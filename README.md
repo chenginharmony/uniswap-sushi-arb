@@ -113,7 +113,7 @@ FLASHBLOCKS_MAX_RECONNECT_DELAY=30
 FLASHBLOCKS_QUEUE_SIZE=1000
 ```
 
-The reusable Flashblocks modules under `src/flashblocks/` normalize provider messages, use a bounded queue, reconnect with backoff, and retain raw payloads for diagnostics. `src/scanner.js` deduplicates transaction/context pairs and rescans only routes registered against affected pools. Pool and route registration is intentionally injected: Base factory and pool addresses must be verified by the operator rather than guessed.
+The reusable Flashblocks modules under `src/flashblocks/` normalize provider messages, use a bounded queue, reconnect with backoff, and retain raw payloads for diagnostics. `src/scanner.js` deduplicates transaction/context/phase pairs, updates local pool state before route lookup, rescans only routes registered against affected pools, limits evaluation concurrency, and rejects evaluations made against a newer state version. `decodeAffectedPools` may return pool addresses or descriptors containing `address`, `reserve0`, and `reserve1`; Base factory and pool addresses must be verified by the operator rather than guessed.
 
 The profitability model in `src/arbitrage/profitability.js` accounts for complete two-leg constant-product quotes, DEX fees, flash-loan fee, gas, slippage, and safety margin. The existing V2 scripts use the net-profit threshold and will not submit while dry-run is enabled.
 

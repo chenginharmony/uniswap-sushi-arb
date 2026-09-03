@@ -12,7 +12,9 @@ class Scanner {
         this.metrics = options.metrics || new Metrics()
         this.client = options.client
         this.decodeAffectedPools = options.decodeAffectedPools || (() => [])
+        this.updatePoolState = options.updatePoolState || this.defaultUpdatePoolState.bind(this)
         this.evaluateRoute = options.evaluateRoute || (() => null)
+        this.maxEvaluationConcurrency = Math.max(1, options.maxEvaluationConcurrency || 8)
         this.seen = new Map()
         this.ttlMs = options.dedupTtlMs || 120000
         this.running = false
@@ -44,17 +46,66 @@ class Scanner {
     }
 
     async process(event) {
-        const key = event.transactionHash + ':' + (event.context || 'unknown')
+        const phase = event.phase || event.status || (event.canonical ? 'canonical' : 'preconfirmation')
+        const key = event.transactionHash + ':' + phase + ':' + (event.context || 'unknown')
         const now = Date.now()
         for (const [seenKey, seenAt] of this.seen) if (now - seenAt > this.ttlMs) this.seen.delete(seenKey)
         if (this.seen.has(key)) { this.metrics.increment('duplicateTransactions'); return }
         this.seen.set(key, now)
         this.metrics.increment('transactionsReceived')
 
-        const affectedPools = this.decodeAffectedPools(event) || []
+        const receivedAt = event.receivedMonotonicNs || process.hrtime.bigint()
+        const decodedAt = process.hrtime.bigint()
+        this.metrics.observe('flashblockReceiveToDecode', Number(decodedAt - receivedAt) / 1000000)
+        const decodedPools = this.decodeAffectedPools(event) || []
+        const affectedPools = await this.updatePoolState(event, decodedPools)
+        this.metrics.observe('poolUpdate', Number(process.hrtime.bigint() - decodedAt) / 1000000)
         const routes = this.state.routesForPools(affectedPools)
         this.metrics.increment('routesRescanned', routes.length)
-        await Promise.all(routes.map(route => this.evaluateRoute(route, event, this.state, this.metrics)))
+        const stateVersion = this.state.version
+        await this.mapWithConcurrency(routes, this.maxEvaluationConcurrency, async route => {
+            const evaluationStarted = process.hrtime.bigint()
+            const result = await this.evaluateRoute(route, event, this.state, this.metrics)
+            this.metrics.observe('routeEvaluation', Number(process.hrtime.bigint() - evaluationStarted) / 1000000)
+            if (this.state.version !== stateVersion || result && result.stateVersion !== undefined && result.stateVersion !== stateVersion) {
+                this.metrics.increment('staleOpportunities')
+                return null
+            }
+            if (result && result.profitable) this.metrics.increment('opportunitiesProfitable')
+            else if (result) this.metrics.increment('opportunitiesRejected')
+            return result
+        })
+    }
+
+    async updatePools(event, decodedPools) {
+        return this.updatePoolState(event, decodedPools)
+    }
+
+    async defaultUpdatePoolState(event, decodedPools) {
+        const addresses = []
+        for (const decodedPool of decodedPools) {
+            const pool = typeof decodedPool === 'string' ? { address: decodedPool } : decodedPool
+            if (!pool || !pool.address) continue
+            if (pool.reserve0 !== undefined && pool.reserve1 !== undefined) {
+                if (this.state.pools.has(pool.address)) this.state.updateReserves(pool.address, pool.reserve0, pool.reserve1, event.context)
+                else this.state.upsertPool(Object.assign({}, pool, { context: event.context }))
+            }
+            addresses.push(pool.address)
+        }
+        return addresses
+    }
+
+    async mapWithConcurrency(items, concurrency, worker) {
+        const results = []
+        let next = 0
+        const run = async () => {
+            while (next < items.length) {
+                const index = next++
+                results[index] = await worker(items[index])
+            }
+        }
+        await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run))
+        return results
     }
 
     stop() {
