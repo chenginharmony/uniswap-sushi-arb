@@ -91,6 +91,38 @@ Once the arbitrage occur (you will notice because the logs on the console) Ctrol
 
 4) Assuming you own an account with the enough eth for paying the gas and fees (and if you use normal swap the tokens as well) you are ready to run the bots. **_Remember that as they are, the bots are not ready for production and even with the changes proposed bellow I dont recommend use them for that porpuse, do it at your own risk_**.
 
+## Net-profit and Flashblocks configuration
+
+The bots now default to `DRY_RUN=true`; qualifying trades are calculated and reported but are not submitted. Set `DRY_RUN=false` only after validating the route, contracts, RPC, and wallet configuration.
+
+Add these optional settings to `.env`:
+
+```bash
+DRY_RUN=true
+MIN_NET_PROFIT_USD=0.20
+MIN_PROFIT_MARGIN_BPS=0
+MAX_SLIPPAGE_BPS=100
+SAFETY_MARGIN_USD=0.00
+ARBITRAGE_SIZES_USD=100,250,500,1000,2500
+MAX_OPPORTUNITY_AGE_MS=150
+FLASHBLOCKS_ENABLED=true
+FLASHBLOCKS_WS_URL=
+FLASHBLOCKS_HTTP_URL=
+FLASHBLOCKS_RECONNECT_DELAY=1
+FLASHBLOCKS_MAX_RECONNECT_DELAY=30
+FLASHBLOCKS_QUEUE_SIZE=1000
+```
+
+The reusable Flashblocks modules under `src/flashblocks/` normalize provider messages, use a bounded queue, reconnect with backoff, and retain raw payloads for diagnostics. `src/scanner.js` deduplicates transaction/context pairs and rescans only routes registered against affected pools. Pool and route registration is intentionally injected: Base factory and pool addresses must be verified by the operator rather than guessed.
+
+The profitability model in `src/arbitrage/profitability.js` accounts for complete two-leg constant-product quotes, DEX fees, flash-loan fee, gas, slippage, and safety margin. The existing V2 scripts use the net-profit threshold and will not submit while dry-run is enabled.
+
+Run the tests with:
+
+```bash
+npm test
+```
+
 ## Notes
 
 + **10/07/21 ->** If u are having gas issues, check out [this tiny thread](https://github.com/6eer/uniswap-sushiswap-arbitrage-bot/issues/2)

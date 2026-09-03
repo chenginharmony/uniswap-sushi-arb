@@ -1,6 +1,8 @@
 require('dotenv').config()//for importing parameters
 require('colors')//for console output
 const Web3 = require('web3')
+const { loadConfig } = require('./config')
+const { calculateProfitability } = require('./arbitrage/profitability')
 
 //ABIs
 const IFactory = require('@uniswap/v2-core/build/IUniswapV2Factory.json')
@@ -19,7 +21,8 @@ let addrToken1 = process.env.ADDR_TOKEN1
 const addrUFactory = process.env.ADDR_UFACTORY
 const addrURouter = process.env.ADDR_UROUTER
 const addrUtils = process.env.ADDR_UTILS
-const localDeplyment = process.env.LOCAL_DEPLOYMENT;
+const runtimeConfig = loadConfig(process.env)
+const localDeplyment = runtimeConfig.localDeployment
 const priceToken0 = process.env.PRICE_TOKEN0
 const priceToken1 = process.env.PRICE_TOKEN1
 const privateKey = process.env.PRIVATE_KEY
@@ -29,18 +32,35 @@ const validPeriod = process.env.VALID_PERIOD
 if (addrToken0 > addrToken1) {aux=addrToken0; addrToken0=addrToken1; addrToken1=aux} //on uniswap pairs, tokens are sort by address, T0<T1
 
 //setting up provider
+const wsProviderOptions = {
+    timeout: 30000,
+    clientConfig: {
+        keepalive: true,
+        keepaliveInterval: 60000
+    },
+    reconnect: {
+        auto: true,
+        delay: 5000,
+        maxAttempts: 10,
+        onTimeout: false
+    }
+}
+
 let web3
 if (localDeplyment) {
 
-    const localProviderUrl = 'http://localhost:8545'
-    const localProvider = new Web3.providers.WebsocketProvider(localProviderUrl)
-    web3 = new Web3(localProvider)
+    console.log('LOCAL_DEPLOYMENT detected: using HTTP polling for Ganache because websocket subscriptions are not available on this local node.')
+    web3 = new Web3(new Web3.providers.HttpProvider('http://localhost:8545'))
 
 } else {
 
     /* In this case we use an infura provider for mainnet, you could use whatever you want but 
     it cant be a http provider because it doesnt support web3 subscriptions (events).*/
-    web3 = new Web3(`wss://mainnet.infura.io/ws/v3/${projectId}`)
+    const infuraProvider = new Web3.providers.WebsocketProvider(`wss://mainnet.infura.io/ws/v3/${projectId}`, wsProviderOptions)
+    infuraProvider.on('connect', () => console.log('WebSocket connected to Infura'))
+    infuraProvider.on('error', (err) => console.error('Infura websocket error:', err && err.message ? err.message : err))
+    infuraProvider.on('close', (event) => console.warn(`Infura websocket closed: ${event.code} ${event.reason || 'no reason'}`))
+    web3 = new Web3(infuraProvider)
 }
 
 //contracts
@@ -71,20 +91,13 @@ async function asyncsVar() {
     token1Symbol = await token1.methods.symbol().call()
 }
 
-asyncsVar()
+let lastBlockScanned = null
 
-//listening for incoming new blocks
-const newBlockEvent = web3.eth.subscribe('newBlockHeaders')
-
-newBlockEvent.on('connected', () =>{console.log('\nBot listening!\n')})
-
-//look for a profit every two mined blocks (two transactions needed to do the trade)
-let skip = true
-newBlockEvent.on('data', async function(blockHeader){
-    
+async function handleBlock(blockHeader) {
+    let skip = true
     skip = !skip
     if (skip) return
-    
+
     try {
 
         let uReserves, uReserve0, uReserve1, sReserves, sReserve0, sReserve1
@@ -146,28 +159,21 @@ newBlockEvent.on('data', async function(blockHeader){
             
             //gas
             const gasNeeded0 = (0.03*10**6)*2//previosly measured (lines below), take to much time, overestimate 2x
-            //const gasNeeded0 = await token0.methods.approve(uRouter.options.address,amountIn).estimateGas()
-
-            /*beyond time spended, you need to approve uRouter to spend T0 
-            before measuring so it will cost eth do it in runtime, al least for the first time*/
             const gasNeeded1 = (0.15*10**6)*2 
-            /*
-            await token0.methods.approve(uRouter.options.address,amountIn).send()
-            const gasNeeded1 = await uRouter.methods.swapExactTokensForTokens(
-                amountIn,
-                0,
-                path,
-                myAccount,
-                deadline
-            ).estimateGas()
-            */
             const gasNeeded=gasNeeded0+gasNeeded1
 
             const gasPrice = await web3.eth.getGasPrice()
             const gasCost = Number(gasPrice)*gasNeeded/10**18
 
-            //profitable?
-            const profit = (totalDifference*priceToken1Eth)-gasCost
+            const profitability = calculateProfitability({
+                grossProfitUsd: totalDifference * priceToken1Eth * priceEth,
+                gasCostUsd: gasCost * priceEth,
+                safetyMarginUsd: runtimeConfig.safetyMarginUsd,
+                minimumNetProfitUsd: runtimeConfig.minNetProfitUsd,
+                minimumProfitMarginBps: runtimeConfig.minProfitMarginBps,
+                maxSlippageBps: runtimeConfig.maxSlippageBps
+            })
+            const profit = profitability.expectedNetProfitUsd / priceEth
 
             console.log(
                 `Block ${blockHeader.number}`.bgBlue+`\n\n`+
@@ -195,47 +201,28 @@ newBlockEvent.on('data', async function(blockHeader){
                 `No profit! (gas cost higher than the total difference achievable)\n`.red}`
                 )
             
-            if (profit<=0) return;
-    
-            const tx0 = {//transaction
-                from: myAccount, 
-                to: token0.options.address, 
-                gas: gasNeeded0, 
-                data: token0.methods.approve(uRouter.options.address,amountIn).encodeABI()
+            if (!profitability.profitable) return
+            if (runtimeConfig.dryRun) {
+                console.log('DRY_RUN enabled - qualifying normal swap was not submitted')
+                return
             }
-
+    
+            const tx0 = {from: myAccount, to: token0.options.address, gas: gasNeeded0, data: token0.methods.approve(uRouter.options.address,amountIn).encodeABI()}
             signedTx0 = await web3.eth.accounts.signTransaction(tx0, privateKey);
-            
             console.log('Tx pending {1/2}')
             receipt0 = await web3.eth.sendSignedTransaction(signedTx0.rawTransaction)
-            
-            console.log(
-                `Tx mined\n`+
-                `Tx hash: ${receipt0.transactionHash}\n`
-                )
+            console.log(`Tx mined\nTx hash: ${receipt0.transactionHash}\n`)
 
             const tx1 = {
-                from: myAccount, 
-                to: uRouter.options.address, 
-                gas: gasNeeded1, 
-                data: uRouter.methods.swapExactTokensForTokens(
-                    amountIn,
-                    0,
-                    path,
-                    myAccount,
-                    deadline
-                ).encodeABI()
+                from: myAccount,
+                to: uRouter.options.address,
+                gas: gasNeeded1,
+                data: uRouter.methods.swapExactTokensForTokens(amountIn,0,path,myAccount,deadline).encodeABI()
             }
-
             signedTx1 = await web3.eth.accounts.signTransaction(tx1, privateKey);
-            
             console.log('Tx pending {2/2}')
             receipt1 = await web3.eth.sendSignedTransaction(signedTx1.rawTransaction)
-            
-            console.log(
-                `Tx mined, trade executed!\n`+
-                `Tx hash: ${receipt1.transactionHash}\n`
-                )
+            console.log(`Tx mined, trade executed!\nTx hash: ${receipt1.transactionHash}\n`)
 
         } else {//T1->T0
 
@@ -256,7 +243,15 @@ newBlockEvent.on('data', async function(blockHeader){
             const gasNeeded=gasNeeded0+gasNeeded1
             const gasPrice = await web3.eth.getGasPrice()
             const gasCost = Number(gasPrice)*gasNeeded/10**18
-            const profit = (totalDifference*priceToken0Eth)-gasCost
+            const profitability = calculateProfitability({
+                grossProfitUsd: totalDifference * priceToken0Eth * priceEth,
+                gasCostUsd: gasCost * priceEth,
+                safetyMarginUsd: runtimeConfig.safetyMarginUsd,
+                minimumNetProfitUsd: runtimeConfig.minNetProfitUsd,
+                minimumProfitMarginBps: runtimeConfig.minProfitMarginBps,
+                maxSlippageBps: runtimeConfig.maxSlippageBps
+            })
+            const profit = profitability.expectedNetProfitUsd / priceEth
 
             console.log(
                 `Block ${blockHeader.number}`.bgBlue+`\n\n`+
@@ -284,57 +279,67 @@ newBlockEvent.on('data', async function(blockHeader){
                 `No profit! (gas cost higher than the total difference achievable)\n`.red}`
                 ) 
             
-                if (profit<=0) return
-
-                const tx0 = {
-                    from: myAccount, 
-                    to: token1.options.address, 
-                    gas: gasNeeded0, 
-                    data: token1.methods.approve(uRouter.options.address,amountIn).encodeABI()
+                if (!profitability.profitable) return
+                if (runtimeConfig.dryRun) {
+                    console.log('DRY_RUN enabled - qualifying normal swap was not submitted')
+                    return
                 }
 
+                const tx0 = {from: myAccount, to: token1.options.address, gas: gasNeeded0, data: token1.methods.approve(uRouter.options.address,amountIn).encodeABI()}
                 signedTx0 = await web3.eth.accounts.signTransaction(tx0, privateKey);
                 console.log('Tx pending {1/2}')
                 receipt0 = await web3.eth.sendSignedTransaction(signedTx0.rawTransaction)
-                console.log(
-                    'Tx mined\n'+
-                    `Tx hash: ${receipt0.transactionHash}\n`
-                    )
+                console.log('Tx mined\n'+`Tx hash: ${receipt0.transactionHash}\n`)
 
                 const tx1 = {
-                    from: myAccount, 
-                    to: uRouter.options.address, 
-                    gas: gasNeeded1, 
-                    data: uRouter.methods.swapExactTokensForTokens(
-                        amountIn,
-                        0,
-                        path,
-                        myAccount,
-                        deadline
-                    ).encodeABI()
+                    from: myAccount,
+                    to: uRouter.options.address,
+                    gas: gasNeeded1,
+                    data: uRouter.methods.swapExactTokensForTokens(amountIn,0,path,myAccount,deadline).encodeABI()
                 }
-
                 const signedTx1 = await web3.eth.accounts.signTransaction(tx1, privateKey);
                 console.log('Tx pending {2/2}')
                 receipt1 = await web3.eth.sendSignedTransaction(signedTx1.rawTransaction)
-                console.log(
-                    'Tx mined, trade executed!\n'+
-                    `Tx hash: ${receipt1.transactionHash}\n`
-                    )
+                console.log('Tx mined, trade executed!\n'+`Tx hash: ${receipt1.transactionHash}\n`)
 
         }
 
-    } 
-    
-    catch(error) {
-
+    } catch(error) {
         console.log(error)
+    }
+}
 
+function subscribeToBlocks() {
+    if (localDeplyment) {
+        ui.banner('ARBITRAGE ENGINE ONLINE — polling Ganache for new blocks')
+        let lastLocalBlock = null
+        setInterval(async () => {
+            try {
+                const latestBlock = await web3.eth.getBlockNumber()
+                if (lastLocalBlock === null) {
+                    lastLocalBlock = latestBlock
+                    return
+                }
+                if (latestBlock <= lastLocalBlock) return
+                const blockHeader = await web3.eth.getBlock(latestBlock)
+                lastLocalBlock = latestBlock
+                await handleBlock(blockHeader)
+            } catch (err) {
+                console.error('Local polling error:', err && err.message ? err.message : err)
+            }
+        }, 2000)
+        return
     }
 
+    const newBlockEvent = web3.eth.subscribe('newBlockHeaders')
+    newBlockEvent.on('connected', () =>{console.log('\nBot listening!\n')})
+    newBlockEvent.on('data', handleBlock)
+    newBlockEvent.on('error', (err) => {
+        console.error('Block subscription error:', err && err.message ? err.message : err)
+        setTimeout(subscribeToBlocks, 5000)
+    })
+}
+
+asyncsVar().then(subscribeToBlocks).catch(error => {
+    console.error('Initialization failed:', error && error.message ? error.message : error)
 })
-
-newBlockEvent.on('error', console.error);
-
-
-
