@@ -15,6 +15,17 @@ function list(value, fallback) {
     return String(value).split(',').map(item => item.trim()).filter(Boolean)
 }
 
+function json(value, fallback) {
+    if (!value) return fallback
+    try {
+        const parsed = JSON.parse(value)
+        if (!Array.isArray(parsed)) throw new Error('expected an array')
+        return parsed
+    } catch (error) {
+        throw new Error(`Invalid BASE_POOL_CONFIG_JSON: ${error.message}`)
+    }
+}
+
 function loadConfig(env) {
     return {
         localDeployment: boolean(env.LOCAL_DEPLOYMENT, false),
@@ -26,6 +37,12 @@ function loadConfig(env) {
         safetyMarginUsd: number(env.SAFETY_MARGIN_USD, 0),
         arbitrageSizesUsd: list(env.ARBITRAGE_SIZES_USD, ['100', '250', '500', '1000', '2500']).map(item => number(item, 0)).filter(item => item > 0),
         maxOpportunityAgeMs: number(env.MAX_OPPORTUNITY_AGE_MS, 150),
+        base: {
+            rpcUrl: env.BASE_RPC_URL || '',
+            wsUrl: env.BASE_WS_URL || '',
+            requireBootstrap: boolean(env.BASE_REQUIRE_BOOTSTRAP, true),
+            poolConfigs: json(env.BASE_POOL_CONFIG_JSON, [])
+        },
         flashblocks: {
             enabled: boolean(env.FLASHBLOCKS_ENABLED, true),
             wsUrl: env.FLASHBLOCKS_WS_URL || '',

@@ -106,6 +106,10 @@ EXECUTION_BUFFER_USD=0.00
 SAFETY_MARGIN_USD=0.00
 ARBITRAGE_SIZES_USD=100,250,500,1000,2500
 MAX_OPPORTUNITY_AGE_MS=150
+BASE_RPC_URL=
+BASE_WS_URL=
+BASE_REQUIRE_BOOTSTRAP=true
+BASE_POOL_CONFIG_JSON=[]
 FLASHBLOCKS_ENABLED=true
 FLASHBLOCKS_WS_URL=
 FLASHBLOCKS_HTTP_URL=
@@ -113,6 +117,23 @@ FLASHBLOCKS_RECONNECT_DELAY=1
 FLASHBLOCKS_MAX_RECONNECT_DELAY=30
 FLASHBLOCKS_QUEUE_SIZE=1000
 ```
+
+`BASE_RPC_URL` is the canonical Base RPC used for bootstrap and reconciliation; `BASE_WS_URL` is reserved for a separate canonical websocket transport and is not reused as the Flashblocks endpoint. Configure pools with full addresses returned by a verified factory or with token pairs for on-chain factory discovery. For example:
+
+```json
+[
+  {
+    "adapter": "aerodrome",
+    "factory": "0x0000000000000000000000000000000000000000",
+    "token0": "0x0000000000000000000000000000000000000000",
+    "token1": "0x0000000000000000000000000000000000000000",
+    "stable": false,
+    "feeBps": 30
+  }
+]
+```
+
+Replace every example address with a verified full Base address; the example is intentionally not a usable deployment. The Aerodrome, Uniswap V3, and PancakeSwap V3 adapters discover configured token pairs through their factory and load token metadata plus live liquidity state. The scanner bootstraps them before consuming Flashblocks, refreshes only pools with recognized Swap logs, and reconciles all configured pools on canonical events.
 
 The reusable Flashblocks modules under `src/flashblocks/` normalize provider messages, use a bounded queue, reconnect with backoff, and retain raw payloads for diagnostics. `src/scanner.js` deduplicates transaction/context/phase pairs, updates local pool state before route lookup, rescans only routes registered against affected pools, limits evaluation concurrency, and rejects evaluations made against a newer state version. `decodeAffectedPools` may return pool addresses or descriptors containing `address`, `reserve0`, and `reserve1`; Base factory and pool addresses must be verified by the operator rather than guessed.
 

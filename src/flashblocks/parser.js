@@ -26,6 +26,8 @@ function parseFlashblockMessage(payload) {
         input,
         gas: first(transaction, ['gas', 'gasLimit']),
         gasPrice: first(transaction, ['gasPrice', 'maxFeePerGas']),
+        logs: first(transaction, ['logs', 'events']) || first(result, ['logs', 'events']) || [],
+        blockNumber: first(transaction, ['blockNumber']) || first(result, ['blockNumber']),
         context: first(result, ['flashblock', 'context', 'blockHash', 'blockNumber']),
         transactionIndex: first(transaction, ['transactionIndex', 'index']),
         receivedAt: Date.now(),

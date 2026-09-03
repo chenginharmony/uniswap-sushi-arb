@@ -11,6 +11,8 @@ class FlashblockTransaction {
         this.gasPrice = values.gasPrice || null
         this.context = values.context || null
         this.transactionIndex = values.transactionIndex === undefined ? null : values.transactionIndex
+        this.logs = values.logs || []
+        this.blockNumber = values.blockNumber || null
         this.receivedAt = values.receivedAt || Date.now()
         this.receivedMonotonicNs = values.receivedMonotonicNs || process.hrtime.bigint()
         this.raw = values.raw

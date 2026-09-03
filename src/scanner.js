@@ -4,6 +4,7 @@ const { loadConfig } = require('./config')
 const { FlashblocksClient } = require('./flashblocks/client')
 const { PoolStateManager } = require('./arbitrage/state')
 const { opportunityFromRoute } = require('./arbitrage/engine')
+const { createBasePoolBootstrapper } = require('./pools/bootstrap')
 const { Metrics } = require('./monitoring/metrics')
 
 class Scanner {
@@ -12,7 +13,10 @@ class Scanner {
         this.state = options.state || new PoolStateManager()
         this.metrics = options.metrics || new Metrics()
         this.client = options.client
-        this.decodeAffectedPools = options.decodeAffectedPools || (() => [])
+        this.poolBootstrapper = options.poolBootstrapper || createBasePoolBootstrapper(this.config, this.state, options)
+        this.bootstrapped = !this.poolBootstrapper
+        this.decodeAffectedPools = options.decodeAffectedPools ||
+            (this.poolBootstrapper ? this.poolBootstrapper.affectedPools.bind(this.poolBootstrapper) : (() => []))
         this.updatePoolState = options.updatePoolState || this.defaultUpdatePoolState.bind(this)
         this.evaluateRoute = options.evaluateRoute || this.defaultEvaluateRoute.bind(this)
         this.maxEvaluationConcurrency = Math.max(1, options.maxEvaluationConcurrency || 8)
@@ -21,20 +25,26 @@ class Scanner {
         this.running = false
     }
 
-    start() {
+    async start() {
         if (!this.config.flashblocks.enabled) return null
-        if (!this.client) {
-            this.client = new FlashblocksClient({
-                url: this.config.flashblocks.wsUrl,
-                queueSize: this.config.flashblocks.queueSize,
-                reconnectDelay: this.config.flashblocks.reconnectDelay,
-                maxReconnectDelay: this.config.flashblocks.maxReconnectDelay
-            })
-        }
         this.running = true
-        this.queue = this.client.start()
-        this.consume()
-        return this.queue
+        try {
+            await this.bootstrapState()
+            if (!this.client) {
+                this.client = new FlashblocksClient({
+                    url: this.config.flashblocks.wsUrl,
+                    queueSize: this.config.flashblocks.queueSize,
+                    reconnectDelay: this.config.flashblocks.reconnectDelay,
+                    maxReconnectDelay: this.config.flashblocks.maxReconnectDelay
+                })
+            }
+            this.queue = this.client.start()
+            this.consume()
+            return this.queue
+        } catch (error) {
+            this.running = false
+            throw error
+        }
     }
 
     async consume() {
@@ -47,6 +57,7 @@ class Scanner {
     }
 
     async process(event) {
+        if (!this.bootstrapped) throw new Error('Scanner cannot process events before pool bootstrap succeeds')
         const phase = event.phase || event.status || (event.canonical ? 'canonical' : 'preconfirmation')
         const key = event.transactionHash + ':' + phase + ':' + (event.context || 'unknown')
         const now = Date.now()
@@ -59,7 +70,11 @@ class Scanner {
         const decodedAt = process.hrtime.bigint()
         this.metrics.observe('flashblockReceiveToDecode', Number(decodedAt - receivedAt) / 1000000)
         const decodedPools = this.decodeAffectedPools(event) || []
-        const affectedPools = await this.updatePoolState(event, decodedPools)
+        let affectedPools = await this.updatePoolState(event, decodedPools)
+        if (phase === 'canonical' && this.poolBootstrapper) {
+            affectedPools = (affectedPools || []).concat(await this.poolBootstrapper.reconcile(event.blockNumber || event.context))
+        }
+        affectedPools = Array.from(new Set(affectedPools || []))
         this.metrics.observe('poolUpdate', Number(process.hrtime.bigint() - decodedAt) / 1000000)
         const routes = this.state.routesForPools(affectedPools)
         this.metrics.increment('routesRescanned', routes.length)
@@ -90,10 +105,26 @@ class Scanner {
             if (!pool || !pool.address) continue
             if (pool.reserve0 !== undefined && pool.reserve1 !== undefined) {
                 this.state.upsertPool(Object.assign({}, pool, { context: event.context }))
+            } else if (this.poolBootstrapper) {
+                await this.poolBootstrapper.refresh([pool.address], event.context)
             }
             addresses.push(pool.address)
         }
         return addresses
+    }
+
+    async bootstrapState() {
+        if (!this.poolBootstrapper) {
+            if (this.config.base && this.config.base.requireBootstrap &&
+                this.config.base.poolConfigs && this.config.base.poolConfigs.length) {
+                throw new Error('BASE_POOL_CONFIG_JSON is required when BASE_REQUIRE_BOOTSTRAP is enabled')
+            }
+            this.bootstrapped = true
+            return []
+        }
+        const records = await this.poolBootstrapper.bootstrap()
+        this.bootstrapped = true
+        return records
     }
 
     async defaultEvaluateRoute(route, event, state, metrics) {

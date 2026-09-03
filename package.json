@@ -4,7 +4,7 @@
   "description": "",
   "main": "",
   "scripts": {
-    "test": "node test/profitability.test.js && node test/flashblocks.test.js && node test/safety.test.js && node test/scanner.test.js"
+    "test": "node test/profitability.test.js && node test/flashblocks.test.js && node test/pools.test.js && node test/safety.test.js && node test/scanner.test.js"
   },
   "keywords": [],
   "author": "6eer",

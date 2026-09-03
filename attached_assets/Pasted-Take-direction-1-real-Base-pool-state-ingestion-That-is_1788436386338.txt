@@ -1,0 +1,98 @@
+Take **direction 1: real Base pool-state ingestion**.
+
+That is the highest-value next step because everything downstream depends on having accurate, fresh liquidity state. Your architecture should become:
+
+```text
+Base Flashblocks
+      │
+      ├── transaction events ──────┐
+      │                            │
+      ▼                            ▼
+Pool-state bootstrap        Live state updates
+      │                            │
+      └──────────┬─────────────────┘
+                 ▼
+          PoolStateManager
+                 │
+                 ▼
+          Affected routes
+                 │
+                 ▼
+          evaluateTrade()
+                 │
+                 ▼
+       net-profit opportunity
+                 │
+                 ▼
+       simulation / safety
+```
+
+### I would implement it in this order
+
+**1. RPC provider**
+
+Add a configurable Base RPC:
+
+```text
+BASE_RPC_URL=...
+BASE_WS_URL=...
+```
+
+Keep the Flashblocks endpoint separate from your normal canonical RPC.
+
+**2. Pool adapters**
+
+Create a clean interface:
+
+```text
+AerodromeAdapter
+UniswapV3Adapter
+PancakeSwapV3Adapter
+```
+
+Each adapter should be responsible for discovering/reading its own pool state.
+
+**3. Bootstrap**
+
+When the scanner starts:
+
+```text
+configured pools
+      ↓
+RPC reads
+      ↓
+token metadata
+      ↓
+liquidity/reserves
+      ↓
+PoolStateManager
+      ↓
+state.version++
+```
+
+Don't start evaluating routes until required pools have successfully bootstrapped.
+
+**4. Live updates**
+
+Then use Flashblocks to identify transactions affecting those pools and update the local state.
+
+Importantly, **don't blindly treat every Flashblock transaction as a reserve update**. Decode the actual swap/event information and update only the affected pool.
+
+**5. Reconciliation**
+
+Every canonical Base block should reconcile your local state.
+
+That gives you:
+
+```text
+Flashblocks = fast state
+Canonical RPC = truth/reconciliation
+```
+
+### One thing I'd do before writing the adapters
+
+Since you're using actual Base contracts now, **don't hardcode pool addresses from partially verified/search-derived data**. Your factory addresses can be configured, while pool discovery should preferably be performed on-chain and then persisted.
+
+That avoids the abbreviated-address problem we encountered earlier.
+
+If you upload your current project, I can inspect the existing `PoolStateManager`, config, and route definitions and give you the exact implementation for this next stage rather than having you restructure it later.
