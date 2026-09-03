@@ -2,11 +2,19 @@
 
 const { evaluateTrade } = require('./profitability')
 
-function opportunityFromRoute(route, amountIn, config) {
+function currentPool(leg, state) {
+    if (!state || !leg) return leg
+    const address = leg.address || leg.poolAddress
+    return address && state.pools.get(address) ? Object.assign({}, leg, state.pools.get(address)) : leg
+}
+
+function opportunityFromRoute(route, amountIn, config, state) {
+    const buyPool = currentPool(route.buyPool, state)
+    const sellPool = currentPool(route.sellPool, state)
     const result = evaluateTrade({
         amountIn,
-        buyPool: route.buyPool,
-        sellPool: route.sellPool,
+        buyPool,
+        sellPool,
         tokenUsdPrice: route.tokenUsdPrice,
         flashloanFeeBps: route.flashloanFeeBps || 0,
         gasCostUsd: route.gasCostUsd || 0,
@@ -21,7 +29,7 @@ function opportunityFromRoute(route, amountIn, config) {
         tokenOut: route.tokenOut,
         route: route.id,
         createdAt: Date.now(),
-        stateVersion: route.stateVersion,
+        stateVersion: state ? state.version : route.stateVersion,
         sourceFlashblock: route.sourceFlashblock || null
     })
 }

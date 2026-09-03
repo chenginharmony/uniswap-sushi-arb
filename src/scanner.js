@@ -87,8 +87,7 @@ class Scanner {
             const pool = typeof decodedPool === 'string' ? { address: decodedPool } : decodedPool
             if (!pool || !pool.address) continue
             if (pool.reserve0 !== undefined && pool.reserve1 !== undefined) {
-                if (this.state.pools.has(pool.address)) this.state.updateReserves(pool.address, pool.reserve0, pool.reserve1, event.context)
-                else this.state.upsertPool(Object.assign({}, pool, { context: event.context }))
+                this.state.upsertPool(Object.assign({}, pool, { context: event.context }))
             }
             addresses.push(pool.address)
         }
