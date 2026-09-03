@@ -24,7 +24,7 @@ state.registerRoute({ id: 'route-a', pools: ['pool-a', 'pool-b'], buyPool: { add
 assert.deepStrictEqual(state.routesForPools(['pool-a']).map(route => route.id), ['route-a'])
 const opportunity = opportunityFromRoute(state.routes.get('route-a'), 10, { minNetProfitUsd: 0, minProfitMarginBps: 0, maxSlippageBps: Infinity, safetyMarginUsd: 0 })
 assert.ok(opportunity.netProfitUsd > 0)
-state.upsertPool({ address: 'pool-a', reserveIn: 10, reserveOut: 10 })
+state.upsertPool({ address: 'pool-a', reserve0: 10, reserve1: 10 })
 const currentStateOpportunity = opportunityFromRoute(state.routes.get('route-a'), 10, { minNetProfitUsd: 0, minProfitMarginBps: 0, maxSlippageBps: Infinity, safetyMarginUsd: 0 }, state)
 assert.ok(currentStateOpportunity.expectedAmountOut < opportunity.expectedAmountOut)
 assert.strictEqual(currentStateOpportunity.stateVersion, state.version)

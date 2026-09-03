@@ -35,6 +35,41 @@ async function main() {
     assert.strictEqual(evaluations, 2)
     assert.strictEqual(scanner.metrics.counters.transactionsReceived, 2)
     assert.ok(scanner.metrics.latencies.flashblockReceiveToDecode.length >= 2)
+
+    const liveState = new PoolStateManager()
+    liveState.upsertPool({ address: 'buy-pool', token0: 'A', token1: 'B', reserve0: 1000, reserve1: 1100, feeBps: 30 })
+    liveState.upsertPool({ address: 'sell-pool', token0: 'B', token1: 'A', reserve0: 1000, reserve1: 1300, feeBps: 30 })
+    liveState.registerRoute({
+        id: 'live-route',
+        pools: ['buy-pool'],
+        buyPool: { address: 'buy-pool' },
+        sellPool: { address: 'sell-pool' },
+        tokenIn: 'A',
+        tokenOut: 'B',
+        tokenUsdPrice: 1
+    })
+
+    const liveScanner = new Scanner({
+        state: liveState,
+        config: {
+            arbitrageSizesUsd: [100],
+            minNetProfitUsd: 0,
+            minProfitMarginBps: 0,
+            maxSlippageBps: Infinity,
+            executionBufferUsd: 0,
+            safetyMarginUsd: 0
+        },
+        decodeAffectedPools: () => [{ address: 'buy-pool', reserve0: 1000, reserve1: 1110 }]
+    })
+    const opportunities = await liveScanner.process({
+        transactionHash: '0xlive',
+        context: 'fb-live',
+        phase: 'preconfirmation'
+    })
+    assert.strictEqual(opportunities.length, 1)
+    assert.strictEqual(opportunities[0].sourceFlashblock, 'fb-live')
+    assert.strictEqual(opportunities[0].stateVersion, liveState.version)
+    assert.strictEqual(liveScanner.metrics.counters.routesRescanned, 1)
     console.log('scanner-tests-ok')
 }
 

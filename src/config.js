@@ -22,6 +22,7 @@ function loadConfig(env) {
         minNetProfitUsd: number(env.MIN_NET_PROFIT_USD, 0.20),
         minProfitMarginBps: number(env.MIN_PROFIT_MARGIN_BPS, 0),
         maxSlippageBps: number(env.MAX_SLIPPAGE_BPS, Infinity),
+        executionBufferUsd: number(env.EXECUTION_BUFFER_USD, number(env.SLIPPAGE_COST_USD, 0)),
         safetyMarginUsd: number(env.SAFETY_MARGIN_USD, 0),
         arbitrageSizesUsd: list(env.ARBITRAGE_SIZES_USD, ['100', '250', '500', '1000', '2500']).map(item => number(item, 0)).filter(item => item > 0),
         maxOpportunityAgeMs: number(env.MAX_OPPORTUNITY_AGE_MS, 150),

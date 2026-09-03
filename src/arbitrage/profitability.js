@@ -59,6 +59,7 @@ function calculateProfitability(values) {
         safetyMarginUsd,
         expectedNetProfitUsd,
         netProfitUsd: expectedNetProfitUsd,
+        amountInUsd,
         profitMarginBps,
         slippageBps,
         liquiditySufficient,

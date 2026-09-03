@@ -3,6 +3,7 @@
 const { loadConfig } = require('./config')
 const { FlashblocksClient } = require('./flashblocks/client')
 const { PoolStateManager } = require('./arbitrage/state')
+const { opportunityFromRoute } = require('./arbitrage/engine')
 const { Metrics } = require('./monitoring/metrics')
 
 class Scanner {
@@ -13,7 +14,7 @@ class Scanner {
         this.client = options.client
         this.decodeAffectedPools = options.decodeAffectedPools || (() => [])
         this.updatePoolState = options.updatePoolState || this.defaultUpdatePoolState.bind(this)
-        this.evaluateRoute = options.evaluateRoute || (() => null)
+        this.evaluateRoute = options.evaluateRoute || this.defaultEvaluateRoute.bind(this)
         this.maxEvaluationConcurrency = Math.max(1, options.maxEvaluationConcurrency || 8)
         this.seen = new Map()
         this.ttlMs = options.dedupTtlMs || 120000
@@ -63,7 +64,7 @@ class Scanner {
         const routes = this.state.routesForPools(affectedPools)
         this.metrics.increment('routesRescanned', routes.length)
         const stateVersion = this.state.version
-        await this.mapWithConcurrency(routes, this.maxEvaluationConcurrency, async route => {
+        const results = await this.mapWithConcurrency(routes, this.maxEvaluationConcurrency, async route => {
             const evaluationStarted = process.hrtime.bigint()
             const result = await this.evaluateRoute(route, event, this.state, this.metrics)
             this.metrics.observe('routeEvaluation', Number(process.hrtime.bigint() - evaluationStarted) / 1000000)
@@ -75,6 +76,7 @@ class Scanner {
             else if (result) this.metrics.increment('opportunitiesRejected')
             return result
         })
+        return results.filter(Boolean)
     }
 
     async updatePools(event, decodedPools) {
@@ -92,6 +94,30 @@ class Scanner {
             addresses.push(pool.address)
         }
         return addresses
+    }
+
+    async defaultEvaluateRoute(route, event, state, metrics) {
+        const tokenUsdPrice = Number(route.tokenUsdPrice)
+        if (!Number.isFinite(tokenUsdPrice) || tokenUsdPrice <= 0) {
+            throw new Error('Route tokenUsdPrice must be a positive finite number')
+        }
+
+        const sizesUsd = this.config.arbitrageSizesUsd || []
+        if (!sizesUsd.length) throw new Error('At least one arbitrage size is required')
+
+        const opportunities = sizesUsd.map(sizeUsd =>
+            opportunityFromRoute(route, sizeUsd / tokenUsdPrice, this.config, state)
+        )
+        const opportunity = opportunities.sort((left, right) =>
+            right.expectedNetProfitUsd - left.expectedNetProfitUsd
+        )[0]
+
+        if (opportunity) {
+            opportunity.sourceFlashblock = event.context || null
+            opportunity.sourceTransactionHash = event.transactionHash || null
+            metrics.recordNetProfit(opportunity.expectedNetProfitUsd)
+        }
+        return opportunity
     }
 
     async mapWithConcurrency(items, concurrency, worker) {

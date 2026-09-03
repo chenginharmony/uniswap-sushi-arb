@@ -1,0 +1,262 @@
+I’ll correct the economics at the source: AMM quotes will continue to include pool fees and price impact, while `dexFeesUsd` becomes informational only; net profit will subtract only flash-loan cost, gas, an explicitly named execution buffer, and safety margin. I’ll also make route evaluation resolve current pool state from `PoolStateManager`, then add exact integer quote support and regression tests for fee double-counting and stale route snapshots. 
+ 
+Read  
+ 
+Read  
+ 
+Read  
+ 
+Read  
+ 
+I’m changing the accounting contract without removing diagnostic fields: `dexFeesUsd` will remain reported but no longer deducted from net profit because the two AMM quotes already include those fees. The configurable deduction will be `executionBufferUsd` (with the old `slippageCostUsd` input retained as a compatibility alias), and I’ll add integer `BigInt` quoting for on-chain amounts while keeping USD conversion at the reporting boundary. 
+ 
+Generating patch (45 lines) in  
+ 
+ 
+``` 
+ 
+``` 
+ 
+ 
+Ran terminal command:  cd /workspaces/uniswap-sushiswap-arbitrage-bot && node test/profitability.test.js 
+ 
+Read , lines 20 to 65 
+ 
+Ran terminal command:  cd /workspaces/uniswap-sushiswap-arbitrage-bot && node - <<'NODE' 
+const {calculateProfitability}=require('./src/arbitrage/profitability'); console.log(calculateProfitability({grossProfitUsd:.52,dexFeesUsd:.14,flashloanFeeUsd:.03,gasCostUsd:.04,slippageCostUsd:.05,safetyMarginUsd:.04,minimumNetProfitUsd:.2})) 
+NODE 
+ 
+Ran terminal command:  cd /workspaces/uniswap-sushiswap-arbitrage-bot && node test/profitability.test.js 
+ 
+The fresh run correctly exposed the old regression expectation: the corrected result is `$0.36`, not `$0.22`, because the `$0.14` DEX fee is now informational. I’m updating that test and adding the exact BigInt assertion, then I’ll wire current pool records into `opportunityFromRoute()` and make scanner reserve updates replace stale route snapshots. 
+ 
+Generating patch (45 lines) in , ,  
+ 
+ 
+``` 
+ 
+``` 
+ 
+``` 
+ 
+``` 
+ 
+``` 
+ 
+``` 
+ 
+ 
+Read  
+ 
+Generating patch (10 lines) in  
+ 
+ 
+``` 
+ 
+``` 
+ 
+ 
+Ran terminal command:  cd /workspaces/uniswap-sushiswap-arbitrage-bot && npm test 
+ 
+Checked , , , no problems found 
+ 
+The corrected accounting and BigInt tests pass. One freshness detail surfaced in the state wiring: an opportunity built from current state must carry the state manager’s current version, not the route’s registration snapshot; I’m fixing that and adding a regression assertion that changed reserves alter the quote. 
+ 
+Generating patch (16 lines) in ,  
+ 
+ 
+``` 
+ 
+``` 
+ 
+``` 
+ 
+``` 
+ 
+ 
+Read , lines 18 to 38 
+ 
+Generating patch (10 lines) in  
+ 
+ 
+``` 
+ 
+``` 
+ 
+ 
+Ran terminal command:  cd /workspaces/uniswap-sushiswap-arbitrage-bot && node test/flashblocks.test.js && node test/profitability.test.js 
+ 
+Ran terminal command:  cd /workspaces/uniswap-sushiswap-arbitrage-bot && npm test 
+ 
+Ran terminal command:  cd /workspaces/uniswap-sushiswap-arbitrage-bot && git diff --stat 
+ 
+Checked , no problems found 
+ 
+Fixed the profitability accounting in `profitability.js`. 
+ 
+Changes: 
+- Removed DEX fees from the net-profit subtraction. AMM quotes already include them. 
+- Kept `dexFeesUsd` as an informational metric. 
+- Added `executionBufferUsd` for configurable execution-risk deductions. 
+- Preserved `slippageCostUsd` as a compatibility alias. 
+- Added exact `BigInt` quoting through `quoteConstantProductExact()`. 
+- Added `netProfitUsd` alongside `expectedNetProfitUsd`. 
+- Added explicit liquidity validation. 
+- Updated route evaluation to resolve pool reserves from current `PoolStateManager` state. 
+- Opportunities now carry the current state version. 
+ 
+Added regression coverage for: 
+- Fee double-counting 
+- Execution buffers 
+- Threshold boundaries 
+- Negative profit 
+- Slippage limits 
+- Insufficient liquidity 
+- BigInt quote arithmetic 
+- Updated pool state replacing stale route snapshots 
+- Freshness after state changes 
+ 
+Validation passed: 
+ 
+```text 
+profitability-tests-ok 
+flashblocks-tests-ok 
+safety-tests-ok 
+scanner-tests-ok 
+``` 
+ 
+`npm test` passes completely with no workspace errors. 
+ 
+Made changes.       Next, I’d **wire the profitability engine into the Flashblocks scanner and test the complete detection pipeline**.
+
+### Step 1 — Fix the economics
+
+Before live execution, change the engine so DEX fees aren't double-counted and make the calculation:
+
+```text
+AMM quote
+   ↓
+final output
+   ↓
+gross trading result
+   ↓
+flashloan fee
+   ↓
+gas estimate
+   ↓
+execution/slippage buffer
+   ↓
+safety margin
+   ↓
+NET PROFIT
+```
+
+Then enforce:
+
+```text
+netProfit >= MIN_NET_PROFIT_USD
+netMargin >= MIN_PROFIT_MARGIN_BPS
+slippage <= MAX_SLIPPAGE_BPS
+liquidity sufficient
+state still fresh
+```
+
+### Step 2 — Connect it to `Scanner`
+
+Your current scanner has:
+
+```js
+this.evaluateRoute(...)
+```
+
+We want that to actually call:
+
+```text
+route
+ ↓
+find current pool reserves
+ ↓
+evaluateTrade()
+ ↓
+profitability result
+ ↓
+log opportunity
+```
+
+So when Flashblocks detects a swap affecting a pool, the bot immediately reevaluates only the routes involving that pool.
+
+### Step 3 — Build the Base pool state
+
+Then we connect your actual Base pools:
+
+```text
+Aerodrome
+Uniswap V3
+PancakeSwap
+       ↓
+PoolStateManager
+       ↓
+local reserves / liquidity
+       ↓
+route evaluator
+```
+
+This is where your **WETH/USDC, WETH/cbBTC, cbBTC/USDC, etc.** routes become real rather than test fixtures.
+
+### Step 4 — Add opportunity logging
+
+Every detected opportunity should produce something like:
+
+```text
+[OPPORTUNITY]
+
+Route:        Aerodrome → Uniswap
+Pair:         WETH/USDC
+Amount:       $1,000
+Gross:        $0.84
+Flashloan:    $0.09
+Gas:          $0.11
+Risk buffer:  $0.10
+────────────────────
+NET:          $0.54
+
+Margin:       5.4 bps
+State:        18421
+Age:          37 ms
+
+STATUS:       PROFITABLE
+```
+
+That gives us something measurable before execution.
+
+### Step 5 — Only then build execution
+
+Don't jump straight to the trading contract yet.
+
+First prove:
+
+```text
+Flashblock received
+        ↓
+pool identified
+        ↓
+state updated
+        ↓
+route rescanned
+        ↓
+quote calculated
+        ↓
+net profit calculated
+        ↓
+profitable opportunity detected
+```
+
+Then we add:
+
+```text
+simulation → transaction construction → signing → submission → confirmation
+```
+
+**So the immediate next task is Step 1 + Step 2: fix** **`engine.js`** **and connect** **`evaluateTrade()`** **to your** **`Scanner`****.**
+
+
