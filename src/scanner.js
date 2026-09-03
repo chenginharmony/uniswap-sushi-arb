@@ -5,6 +5,7 @@ const { FlashblocksClient } = require('./flashblocks/client')
 const { PoolStateManager } = require('./arbitrage/state')
 const { opportunityFromRoute } = require('./arbitrage/engine')
 const { createBasePoolBootstrapper } = require('./pools/bootstrap')
+const { CanonicalBlockFeed } = require('./pools/provider')
 const { Metrics } = require('./monitoring/metrics')
 
 class Scanner {
@@ -14,6 +15,16 @@ class Scanner {
         this.metrics = options.metrics || new Metrics()
         this.client = options.client
         this.poolBootstrapper = options.poolBootstrapper || createBasePoolBootstrapper(this.config, this.state, options)
+        this.canonicalFeed = options.canonicalFeed || options.canonicalClient
+        if (!this.canonicalFeed && this.poolBootstrapper && this.config.base && this.config.base.wsUrl) {
+            this.canonicalFeed = new CanonicalBlockFeed({
+                url: this.config.base.wsUrl,
+                provider: this.poolBootstrapper.provider,
+                reconnectDelay: this.config.base.reconnectDelay,
+                maxReconnectDelay: this.config.base.maxReconnectDelay,
+                metrics: this.metrics
+            })
+        }
         this.bootstrapped = !this.poolBootstrapper
         this.decodeAffectedPools = options.decodeAffectedPools ||
             (this.poolBootstrapper ? this.poolBootstrapper.affectedPools.bind(this.poolBootstrapper) : (() => []))
@@ -26,11 +37,16 @@ class Scanner {
     }
 
     async start() {
-        if (!this.config.flashblocks.enabled) return null
+        const flashblocksEnabled = Boolean(this.config.flashblocks && this.config.flashblocks.enabled)
+        const canonicalEnabled = Boolean(this.canonicalFeed)
+        if (!flashblocksEnabled && !canonicalEnabled) return null
         this.running = true
         try {
             await this.bootstrapState()
-            if (!this.client) {
+            if (canonicalEnabled) {
+                this.canonicalFeed.start(this.reconcileCanonicalBlock.bind(this))
+            }
+            if (flashblocksEnabled && !this.client) {
                 this.client = new FlashblocksClient({
                     url: this.config.flashblocks.wsUrl,
                     queueSize: this.config.flashblocks.queueSize,
@@ -38,11 +54,15 @@ class Scanner {
                     maxReconnectDelay: this.config.flashblocks.maxReconnectDelay
                 })
             }
-            this.queue = this.client.start()
-            this.consume()
+            if (flashblocksEnabled) {
+                this.queue = this.client.start()
+                this.consume()
+            }
             return this.queue
         } catch (error) {
             this.running = false
+            if (this.canonicalFeed) this.canonicalFeed.stop()
+            if (this.client) this.client.stop()
             throw error
         }
     }
@@ -78,6 +98,39 @@ class Scanner {
         this.metrics.observe('poolUpdate', Number(process.hrtime.bigint() - decodedAt) / 1000000)
         const routes = this.state.routesForPools(affectedPools)
         this.metrics.increment('routesRescanned', routes.length)
+        return this.evaluateRoutes(routes, event)
+    }
+
+    async reconcileCanonicalBlock(block) {
+        if (!this.bootstrapped) throw new Error('Scanner cannot reconcile blocks before pool bootstrap succeeds')
+        if (!this.poolBootstrapper) return []
+
+        const context = block && (block.number || block.blockNumber || block.hash)
+        const startedAt = process.hrtime.bigint()
+        try {
+            const affectedPools = await this.poolBootstrapper.reconcile(context)
+            this.metrics.increment('canonicalBlocksReconciled')
+            this.metrics.increment('canonicalPoolsChanged', affectedPools.length)
+            this.metrics.observe('canonicalReconciliation', Number(process.hrtime.bigint() - startedAt) / 1000000)
+            const routes = this.state.routesForPools(affectedPools)
+            this.metrics.increment('routesRescanned', routes.length)
+            return this.evaluateRoutes(routes, {
+                blockNumber: context,
+                context,
+                phase: 'canonical',
+                canonical: true,
+                block
+            })
+        } catch (error) {
+            this.metrics.increment('canonicalReconciliationErrors')
+            this.metrics.increment('canonicalRpcFailures')
+            this.metrics.observe('canonicalReconciliation', Number(process.hrtime.bigint() - startedAt) / 1000000)
+            console.error('[CANONICAL] reconciliation failed:', error.message)
+            throw error
+        }
+    }
+
+    async evaluateRoutes(routes, event) {
         const stateVersion = this.state.version
         const results = await this.mapWithConcurrency(routes, this.maxEvaluationConcurrency, async route => {
             const evaluationStarted = process.hrtime.bigint()
@@ -167,6 +220,7 @@ class Scanner {
     stop() {
         this.running = false
         if (this.client) this.client.stop()
+        if (this.canonicalFeed) this.canonicalFeed.stop()
     }
 }
 

@@ -41,7 +41,9 @@ function loadConfig(env) {
             rpcUrl: env.BASE_RPC_URL || '',
             wsUrl: env.BASE_WS_URL || '',
             requireBootstrap: boolean(env.BASE_REQUIRE_BOOTSTRAP, true),
-            poolConfigs: json(env.BASE_POOL_CONFIG_JSON, [])
+            poolConfigs: json(env.BASE_POOL_CONFIG_JSON, []),
+            reconnectDelay: number(env.BASE_WS_RECONNECT_DELAY, 1),
+            maxReconnectDelay: number(env.BASE_WS_MAX_RECONNECT_DELAY, 30)
         },
         flashblocks: {
             enabled: boolean(env.FLASHBLOCKS_ENABLED, true),

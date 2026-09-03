@@ -12,6 +12,26 @@ const ADAPTERS = {
     pancakeswapv3: PancakeSwapV3Adapter
 }
 
+function valuesEqual(left, right) {
+    if (left === right) return true
+    if (left === undefined || left === null || right === undefined || right === null) return false
+    if (typeof left === 'object' || typeof right === 'object') {
+        try { return JSON.stringify(left) === JSON.stringify(right) } catch (error) { return false }
+    }
+    return String(left) === String(right)
+}
+
+function poolStateChanged(previous, next) {
+    if (!previous) return true
+    const ignored = new Set(['context', 'source', 'updatedAt'])
+    const keys = new Set(Object.keys(previous).concat(Object.keys(next)))
+    for (const key of keys) {
+        if (ignored.has(key)) continue
+        if (!valuesEqual(previous[key], next[key])) return true
+    }
+    return false
+}
+
 function createBaseAdapters(config, provider) {
     const grouped = new Map()
     for (const descriptor of config.base.poolConfigs || []) {
@@ -65,7 +85,12 @@ class PoolStateBootstrapper {
             const entry = this.discovered.get(String(address).toLowerCase())
             if (!entry) continue
             const state = await entry.adapter.readPoolState(entry.descriptor)
-            refreshed.push(this.state.upsertPool(Object.assign({}, state, { context, source })))
+            const nextState = Object.assign({}, state, { context, source })
+            const previous = this.state.pools.get(state.address) ||
+                this.state.pools.get(String(state.address).toLowerCase())
+            if (poolStateChanged(previous, nextState)) {
+                refreshed.push(this.state.upsertPool(nextState))
+            }
         }
         return refreshed.map(pool => pool.address)
     }

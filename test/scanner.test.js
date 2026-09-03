@@ -70,6 +70,51 @@ async function main() {
     assert.strictEqual(opportunities[0].sourceFlashblock, 'fb-live')
     assert.strictEqual(opportunities[0].stateVersion, liveState.version)
     assert.strictEqual(liveScanner.metrics.counters.routesRescanned, 1)
+
+    let canonicalStarted = 0
+    let canonicalStopped = 0
+    let canonicalHandler
+    const canonicalFeed = {
+        start(handler) {
+            canonicalStarted += 1
+            canonicalHandler = handler
+        },
+        stop() { canonicalStopped += 1 }
+    }
+    const canonicalState = new PoolStateManager()
+    canonicalState.upsertPool({ address: 'canonical-pool', token0: 'A', token1: 'B', reserve0: 1, reserve1: 1 })
+    canonicalState.registerRoute({ id: 'canonical-route', pools: ['canonical-pool'] })
+    let reconciliations = 0
+    let canonicalEvaluations = 0
+    const canonicalScanner = new Scanner({
+        state: canonicalState,
+        config: {
+            flashblocks: { enabled: false },
+            base: { wsUrl: 'wss://canonical-base.example' }
+        },
+        canonicalFeed,
+        poolBootstrapper: {
+            async bootstrap() { return [] },
+            affectedPools() { return [] },
+            async reconcile(context) {
+                reconciliations += 1
+                assert.strictEqual(context, 100)
+                return ['canonical-pool']
+            }
+        },
+        evaluateRoute: async () => {
+            canonicalEvaluations += 1
+            return { profitable: false, stateVersion: canonicalState.version }
+        }
+    })
+    await canonicalScanner.start()
+    assert.strictEqual(canonicalStarted, 1)
+    await canonicalHandler({ number: 100, hash: '0xblock' })
+    assert.strictEqual(reconciliations, 1)
+    assert.strictEqual(canonicalEvaluations, 1)
+    canonicalScanner.stop()
+    assert.strictEqual(canonicalStopped, 1)
+
     console.log('scanner-tests-ok')
 }
 

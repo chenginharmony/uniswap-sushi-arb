@@ -50,6 +50,8 @@ async function main() {
     assert.strictEqual(state.pools.get(pool).token1Symbol, 'USDC')
     assert.strictEqual(state.pools.get(pool).feeBps, 30)
     assert.strictEqual(state.version, 1)
+    assert.deepStrictEqual(await bootstrapper.reconcile(2), [])
+    assert.strictEqual(state.version, 1)
 
     assert.deepStrictEqual(bootstrapper.affectedPools({
         logs: [{ address: pool, event: 'Transfer' }]
