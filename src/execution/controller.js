@@ -147,6 +147,7 @@ class ExecutionController {
         }
 
         // Gate 5: Construct Transaction Calldata
+        if (context.profiler && context.traceId) context.profiler.mark(context.traceId, 'builderStarted')
         const txBuild = buildFlashArbitrageTransaction(opportunity, {
             dryRun: this.dryRun,
             executionEnabled: this.executionEnabled,
@@ -176,6 +177,7 @@ class ExecutionController {
         console.log(formatFingerprintLog(preflightFingerprint, 'PRE-PREFLIGHT'))
 
         // Gate 6: eth_call Preflight Simulation (Verify transaction would succeed without reverting)
+        if (context.profiler && context.traceId) context.profiler.mark(context.traceId, 'preflightStarted')
         const _preflightT0 = Date.now()
         const preflightResult = await this.preflight(txBuild.unsignedTransaction, this.rpcUrl)
         const _preflightLatencyMs = Date.now() - _preflightT0

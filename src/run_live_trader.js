@@ -457,13 +457,14 @@ async function main() {
         lines.push(formatRow(['Pipeline Stage', 'P50 (ms)', 'P90 (ms)', 'P99 (ms)', 'Max (ms)', 'Budget Status'], profCols, width))
         lines.push('├' + '─'.repeat(width - 2) + '┤')
         const stagesList = [
-            ['1. State Update', profSummary.stages.stateUpdateMs],
-            ['2. Route Quoting', profSummary.stages.quoteRoutingMs],
-            ['3. Size Optimizer', profSummary.stages.optimizerMs],
-            ['4. Tx Builder', profSummary.stages.builderMs],
-            ['5. Preflight Sim', profSummary.stages.preflightMs],
-            ['6. Local Signer', profSummary.stages.signingMs],
-            ['7. RPC Broadcast', profSummary.stages.broadcastMs],
+            ['1. Ingest / Queue', profSummary.stages.ingestionToStateStartMs],
+            ['2. State Decode', profSummary.stages.stateUpdateMs],
+            ['3. Route Quoting', profSummary.stages.quoteRoutingMs],
+            ['4. Size Optimizer', profSummary.stages.optimizerMs],
+            ['5. Tx Builder', profSummary.stages.builderMs],
+            ['6. Preflight Sim', profSummary.stages.preflightMs],
+            ['7. Local Signer', profSummary.stages.signingMs],
+            ['8. RPC Broadcast', profSummary.stages.broadcastMs],
             ['Opportunity Age', profSummary.stages.opportunityAgeMs],
             ['Total Pipeline', profSummary.stages.totalPipelineMs]
         ]
@@ -581,9 +582,12 @@ async function main() {
                     route: opt.route || route.id,
                     stateVersion,
                     buyPool: buyAddr,
-                    sellPool: sellAddr
+                    sellPool: sellAddr,
+                    isHotPath: true
                 })
+                defaultProfiler.mark(traceId, 'stateUpdateStarted')
                 defaultProfiler.mark(traceId, 'stateUpdated')
+                defaultProfiler.mark(traceId, 'quoteStarted')
                 defaultProfiler.mark(traceId, 'routesRepriced')
             }
             defaultProfiler.mark(traceId, 'optimized')
@@ -724,16 +728,19 @@ async function main() {
                         await Promise.all(poolList.map(async poolDef => {
                             const pAddr = poolDef.address.toLowerCase()
                             const fbTraceId = `fb-${Date.now()}-${pAddr.slice(2, 8)}`
-                            defaultProfiler.startTrace(fbTraceId, { pool: pAddr, trigger: 'flashblock' })
+                            defaultProfiler.startTrace(fbTraceId, { pool: pAddr, trigger: 'flashblock', isHotPath: true })
+                            defaultProfiler.mark(fbTraceId, 'stateUpdateStarted')
                             
                             // Phase 1: In-Memory State Read (0ms latency, zero RPC roundtrip in hot path)
                             const currentPoolState = poolStates.get(pAddr)
                             if (currentPoolState) {
                                 defaultProfiler.mark(fbTraceId, 'stateUpdated')
+                                defaultProfiler.mark(fbTraceId, 'quoteStarted')
                                 
                                 // Phase 2: Affected-Only Route Quoting (4-8 routes instead of 812)
                                 const affectedRoutes = routesByPool.get(pAddr) || []
                                 defaultProfiler.mark(fbTraceId, 'routesRepriced')
+                                defaultProfiler.mark(fbTraceId, 'optimizerStarted')
 
                                 let anyExecuted = false
                                 await Promise.all(affectedRoutes.map(async route => {
@@ -765,7 +772,7 @@ async function main() {
 
         // Asynchronous parallel universe refresh: update 12 pools per cycle in background
         const rotTraceId = `rot-${cycle}-${Date.now()}`
-        defaultProfiler.startTrace(rotTraceId, { trigger: 'rotation', cycle })
+        defaultProfiler.startTrace(rotTraceId, { trigger: 'rotation', cycle, isHotPath: false })
 
         const batchSize = 12
         const offset = ((cycle - 1) * batchSize) % poolDefs.length

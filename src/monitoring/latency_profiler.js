@@ -19,6 +19,7 @@ class LatencyProfiler {
         // Stage metrics buckets
         this.stageSamples = {
             stateUpdateMs: [],
+            ingestionToStateStartMs: [],
             quoteRoutingMs: [],
             optimizerMs: [],
             builderMs: [],
@@ -35,7 +36,7 @@ class LatencyProfiler {
      * Initiates a new high-resolution execution trace.
      *
      * @param {string} traceId - Unique trace ID or opportunity ID
-     * @param {Object} metadata - Context (route, stateVersion, pool, blockNumber)
+     * @param {Object} metadata - Context (route, stateVersion, pool, blockNumber, trigger, isHotPath)
      * @returns {Object} Active trace tracker
      */
     startTrace(traceId, metadata = {}) {
@@ -58,10 +59,15 @@ class LatencyProfiler {
     /**
      * Records a milestone checkpoint in an active trace.
      * Checkpoint names:
-     *   - 'stateUpdated': Pool reserves/slot0 state decoded
+     *   - 'stateUpdateStarted': Ingestion complete, state decode begins
+     *   - 'stateUpdated': Pool reserves/slot0 state decoded into memory
+     *   - 'quoteStarted': Cross-DEX arbitrage quoting begins
      *   - 'routesRepriced': Affected cross-DEX routes quoted
+     *   - 'optimizerStarted': Dynamic trade sizing search begins
      *   - 'optimized': Dynamic sizing and profit curve finalized
+     *   - 'builderStarted': Calldata construction begins
      *   - 'built': Calldata constructed with repayment floor
+     *   - 'preflightStarted': eth_call simulation begins
      *   - 'preflighted': eth_call simulation + estimateGas completed
      *   - 'signed': EIP-1559 transaction signed locally
      *   - 'broadcasted': Transaction submitted to RPC mempool
@@ -94,13 +100,14 @@ class LatencyProfiler {
             return Number(endNs - startNs) / 1e6
         }
 
-        // Compute step-by-step latency intervals
+        // Compute step-by-step latency intervals with fine-grained isolation
         trace.intervals = {
-            stateUpdateMs: toMs(cp.fbReceived, cp.stateUpdated),
-            quoteRoutingMs: toMs(cp.stateUpdated || cp.fbReceived, cp.routesRepriced),
-            optimizerMs: toMs(cp.routesRepriced || cp.stateUpdated || cp.fbReceived, cp.optimized),
-            builderMs: toMs(cp.optimized, cp.built),
-            preflightMs: toMs(cp.built, cp.preflighted),
+            stateUpdateMs: toMs(cp.stateUpdateStarted || cp.fbReceived, cp.stateUpdated),
+            ingestionToStateStartMs: toMs(cp.fbReceived, cp.stateUpdateStarted),
+            quoteRoutingMs: toMs(cp.quoteStarted || cp.stateUpdated || cp.fbReceived, cp.routesRepriced),
+            optimizerMs: toMs(cp.optimizerStarted || cp.routesRepriced || cp.stateUpdated || cp.fbReceived, cp.optimized),
+            builderMs: toMs(cp.builderStarted || cp.optimized, cp.built),
+            preflightMs: toMs(cp.preflightStarted || cp.built, cp.preflighted),
             signingMs: toMs(cp.preflighted, cp.signed),
             broadcastMs: toMs(cp.signed, cp.broadcasted),
             opportunityAgeMs: toMs(cp.fbReceived, cp.broadcasted || cp.signed || cp.preflighted || cp.optimized),
@@ -112,12 +119,16 @@ class LatencyProfiler {
         trace.completed = true
         this.activeTraces.delete(traceId)
 
-        // Record into rolling statistics
-        for (const [stage, val] of Object.entries(trace.intervals)) {
-            if (val > 0 && this.stageSamples[stage]) {
-                this.stageSamples[stage].push(val)
-                if (this.stageSamples[stage].length > 500) {
-                    this.stageSamples[stage].shift()
+        // Only record into hot-path 200ms MEV statistics if this trace is a hot-path execution
+        // Prevents background periodic HTTP RPC poll cycles from poisoning 200ms Flashblock telemetry
+        const isHotPath = trace.metadata.isHotPath !== false && trace.metadata.trigger !== 'rotation'
+        if (isHotPath) {
+            for (const [stage, val] of Object.entries(trace.intervals)) {
+                if (val > 0 && this.stageSamples[stage]) {
+                    this.stageSamples[stage].push(val)
+                    if (this.stageSamples[stage].length > 500) {
+                        this.stageSamples[stage].shift()
+                    }
                 }
             }
         }
