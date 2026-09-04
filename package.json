@@ -10,7 +10,8 @@
     "live-trade": "node src/run_live_trader.js",
     "report": "node scripts/paper_trading_report.js",
     "campaign-report": "node scripts/campaign_report.js",
-    "test": "node test/profitability.test.js && node test/flashblocks.test.js && node test/pools.test.js && node test/provider.test.js && node test/safety.test.js && node test/scanner.test.js && node test/v3_quote.test.js && node test/state_divergence.test.js && node test/optimizer.test.js && node test/execution.test.js && node test/fork_simulation.test.js && node test/execution_controller.test.js && node test/deployment_verification.test.js && node test/paper_trader.test.js && node test/broadcaster.test.js && node test/latency_profiler.test.js && node test/fingerprint_parity.test.js && node test/preflight_campaign.test.js"
+    "campaign-clean": "node scripts/campaign_report.js --clean",
+    "test": "node test/profitability.test.js && node test/flashblocks.test.js && node test/pools.test.js && node test/provider.test.js && node test/safety.test.js && node test/scanner.test.js && node test/v3_quote.test.js && node test/state_divergence.test.js && node test/optimizer.test.js && node test/execution.test.js && node test/fork_simulation.test.js && node test/execution_controller.test.js && node test/deployment_verification.test.js && node test/paper_trader.test.js && node test/broadcaster.test.js && node test/latency_profiler.test.js && node test/fingerprint_parity.test.js && node test/preflight_campaign.test.js && node test/gas_policy.test.js"
   },
   "keywords": [],
   "author": "6eer",

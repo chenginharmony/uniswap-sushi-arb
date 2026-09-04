@@ -5,7 +5,8 @@ const { preflightSimulation } = require('./preflight')
 const { NonceManager } = require('./nonce_manager')
 const { IsolatedSigner } = require('./signer')
 const { buildFingerprint, verifyFingerprintParity, formatFingerprintLog } = require('./fingerprint')
-const { campaignLogger } = require('../monitoring/preflight_campaign')
+const { campaignLogger, NullCampaignLogger } = require('../monitoring/preflight_campaign')
+const { validateAndSizeGas } = require('./gas_policy')
 
 /**
  * @title ExecutionController
@@ -45,8 +46,14 @@ class ExecutionController {
         this.preflight = options.preflight || preflightSimulation
         this.revalidateState = options.revalidateState || null
         this.executionLogs = []
-        // Allow tests to inject a mock campaign logger; production uses the singleton
-        this.campaign = options.campaign || campaignLogger
+        // Allow tests to inject a mock campaign logger; default to NullCampaignLogger in test env, singleton in production
+        if (options.campaign) {
+            this.campaign = options.campaign
+        } else if (process.env.NODE_ENV === 'test') {
+            this.campaign = new NullCampaignLogger()
+        } else {
+            this.campaign = campaignLogger
+        }
     }
 
     /**
@@ -198,6 +205,10 @@ class ExecutionController {
             this.campaign.record(res, opportunity, txBuild.flashParams, {
                 preflightLatencyMs: _preflightLatencyMs,
                 revertReason: res.revertReason,
+                opportunityStateVersion: opportunity.stateVersion,
+                preflightStateVersion,
+                postStateVersion: preflightStateVersion,
+                deltaVersion: 0,
                 stateVersion: preflightStateVersion,
                 opportunityAgeMs: ageMs,
                 fingerprintHash: preflightFingerprint.hash
@@ -212,8 +223,9 @@ class ExecutionController {
         // and update pool state in that window. If the state version has changed,
         // the opportunity is now stale relative to the simulation. ABORT.
         // ─────────────────────────────────────────────────────────────────────────────
+        let postPreflightVersion = preflightStateVersion
         if (typeof context.getStateVersion === 'function') {
-            const postPreflightVersion = context.getStateVersion()
+            postPreflightVersion = context.getStateVersion()
             if (postPreflightVersion !== preflightStateVersion) {
                 console.warn(
                     `[controller] ABORT: State version changed during eth_call. ` +
@@ -228,6 +240,10 @@ class ExecutionController {
                 }
                 this.campaign.record(res, opportunity, txBuild.flashParams, {
                     preflightLatencyMs: _preflightLatencyMs,
+                    opportunityStateVersion: opportunity.stateVersion,
+                    preflightStateVersion,
+                    postStateVersion: postPreflightVersion,
+                    deltaVersion: postPreflightVersion - preflightStateVersion,
                     stateVersion: preflightStateVersion,
                     opportunityAgeMs: ageMs,
                     estimatedGas: preflightResult.estimatedGas,
@@ -237,18 +253,38 @@ class ExecutionController {
             }
         }
 
-        // Dynamic Gas Sizing: apply 25% safety buffer clamped to [450k, 700k]
-        // IMPORTANT: gasLimit is the only field the controller is allowed to update
-        // after eth_call. After this update, a fresh signing fingerprint is computed
-        // and verified for parity with the pre-preflight fingerprint (minus gasLimit).
-        if (preflightResult.estimatedGas) {
-            const est = Number(preflightResult.estimatedGas)
-            const withBuffer = Math.floor(est * 1.25)
-            const clamped = Math.min(700000, Math.max(450000, withBuffer))
-            txBuild.unsignedTransaction.gasLimit = BigInt(clamped)
-        } else if (!txBuild.unsignedTransaction.gasLimit) {
-            txBuild.unsignedTransaction.gasLimit = 650000n
+        // ─────────────────────────────────────────────────────────────────────────────
+        // Bounded Gas Policy Stage: Dynamic route-based sizing & envelope validation
+        // ─────────────────────────────────────────────────────────────────────────────
+        const gasValidation = validateAndSizeGas(txBuild, opportunity, {
+            estimatedGas: preflightResult.estimatedGas
+        })
+        if (!gasValidation.valid) {
+            console.error(
+                `[controller] GAS_POLICY_ABORT: ${gasValidation.reason} ` +
+                `route=${opportunity.routeId || opportunity.route || opportunity.id} ` +
+                `est=${gasValidation.estimatedGas} maxAllowed=${gasValidation.maxAllowed}`
+            )
+            const res = {
+                executed: false,
+                reason: gasValidation.reason,
+                detail: gasValidation
+            }
+            this.campaign.record(res, opportunity, txBuild.flashParams, {
+                preflightLatencyMs: _preflightLatencyMs,
+                opportunityStateVersion: opportunity.stateVersion,
+                preflightStateVersion,
+                postStateVersion: postPreflightVersion,
+                deltaVersion: 0,
+                stateVersion: preflightStateVersion,
+                opportunityAgeMs: ageMs,
+                estimatedGas: preflightResult.estimatedGas,
+                gasPolicy: gasValidation,
+                fingerprintHash: preflightFingerprint.hash
+            })
+            return res
         }
+        txBuild.unsignedTransaction.gasLimit = gasValidation.gasLimit
 
         // ─────────────────────────────────────────────────────────────────────────────
         // Phase 4 Gate C: PRE-SIGNING FINGERPRINT & BYTE-EXACT PARITY ASSERTION
@@ -292,9 +328,14 @@ class ExecutionController {
             }
             this.campaign.record(res, opportunity, txBuild.flashParams, {
                 preflightLatencyMs: _preflightLatencyMs,
+                opportunityStateVersion: opportunity.stateVersion,
+                preflightStateVersion,
+                postStateVersion: postPreflightVersion,
+                deltaVersion: 0,
                 stateVersion: preflightStateVersion,
                 opportunityAgeMs: ageMs,
                 estimatedGas: preflightResult.estimatedGas,
+                gasPolicy: gasValidation,
                 fingerprintHash: preflightFingerprint.hash
             })
             return res
@@ -362,9 +403,14 @@ class ExecutionController {
                 if (this.executionLogs.length > 50) this.executionLogs.pop()
                 this.campaign.record(receipt, opportunity, txBuild.flashParams, {
                     preflightLatencyMs: _preflightLatencyMs,
+                    opportunityStateVersion: opportunity.stateVersion,
+                    preflightStateVersion,
+                    postStateVersion: postPreflightVersion,
+                    deltaVersion: 0,
                     stateVersion: preflightStateVersion,
                     opportunityAgeMs: ageMs,
                     estimatedGas: preflightResult.estimatedGas,
+                    gasPolicy: gasValidation,
                     fingerprintHash: preflightFingerprint.hash
                 })
                 return receipt
@@ -387,6 +433,7 @@ class ExecutionController {
                 preflightPassed: true,
                 fingerprintParity: true,
                 fingerprintHash: preflightFingerprint.hash,
+                gasPolicy: gasValidation,
                 timestamp: Date.now()
             }
 
@@ -400,9 +447,14 @@ class ExecutionController {
             if (this.executionLogs.length > 50) this.executionLogs.pop()
             this.campaign.record(receipt, opportunity, txBuild.flashParams, {
                 preflightLatencyMs: _preflightLatencyMs,
+                opportunityStateVersion: opportunity.stateVersion,
+                preflightStateVersion,
+                postStateVersion: postPreflightVersion,
+                deltaVersion: 0,
                 stateVersion: preflightStateVersion,
                 opportunityAgeMs: ageMs,
                 estimatedGas: preflightResult.estimatedGas,
+                gasPolicy: gasValidation,
                 fingerprintHash: preflightFingerprint.hash
             })
 

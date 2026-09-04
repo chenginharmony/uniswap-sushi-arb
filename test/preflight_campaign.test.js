@@ -1,4 +1,5 @@
 'use strict'
+process.env.NODE_ENV = 'test'
 
 const assert = require('assert')
 const fs = require('fs')
@@ -132,11 +133,11 @@ async function main() {
         const fp = { flashPool: '0xb4cb800910b228ed3d0834cf79d697127bbb00e5', borrowAmount: 200000000000000000n, expectedRepayment: 200100000000000000n, minProfitSurplus: 461538n, swapPool1: '0xb4cb800910b228ed3d0834cf79d697127bbb00e5', swapPool2: '0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38' }
 
         // Record a success
-        camp.record({ executed: true, fingerprintParity: true, fingerprintHash: 'abc123', gasLimit: '650000' }, opp, fp, {
+        camp.record({ executed: true, fingerprintParity: true, fingerprintHash: 'abc123', gasLimit: '350000' }, opp, fp, {
             preflightLatencyMs: 22,
             stateVersion: 7,
             opportunityAgeMs: 12,
-            estimatedGas: 520000n,
+            estimatedGas: 280000n,
             fingerprintHash: 'abc123'
         })
         // Record a revert
@@ -189,7 +190,7 @@ async function main() {
     try {
         const log = tmpLog()
         const camp = new PreflightCampaign({ logPath: log, verbose: false })
-        const mockPreflight = async () => ({ simulated: true, success: true, reverted: false, estimatedGas: 520000n })
+        const mockPreflight = async () => ({ simulated: true, success: true, reverted: false, estimatedGas: 280000n })
 
         const ctrl = new ExecutionController({
             maxSizeUsd: 10000, minProfitUsd: 0.50, maxOpportunityAgeMs: 5000,

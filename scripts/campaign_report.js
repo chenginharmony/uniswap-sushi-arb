@@ -3,15 +3,29 @@
 /**
  * @title Preflight Campaign Survival Funnel & Decision Gates Report
  * @notice Analyzes data/preflight_campaign.jsonl and calculates the complete
- * stage-by-stage MEV survival funnel, decision gate metrics, revert causes,
- * and latency distributions for Base Mainnet Flashblock arbitrage.
+ * stage-by-stage MEV survival funnel, decision gate metrics, state-divergence forensics,
+ * revert causes, and latency distributions for Base Mainnet Flashblock arbitrage.
+ *
+ * Flags:
+ *   --clean   Wipes the campaign log file to start a fresh collection window.
+ *   --all     Includes synthetic test fixture events in the statistics.
  */
 
 const fs = require('fs')
 const path = require('path')
-const { OUTCOME } = require('../src/monitoring/preflight_campaign')
+const { OUTCOME, classifyOutcome } = require('../src/monitoring/preflight_campaign')
 
 const CAMPAIGN_FILE = path.join(__dirname, '..', 'data', 'preflight_campaign.jsonl')
+
+if (process.argv.includes('--clean')) {
+    if (fs.existsSync(CAMPAIGN_FILE)) {
+        fs.writeFileSync(CAMPAIGN_FILE, '', 'utf8')
+        console.log('✓ Successfully wiped data/preflight_campaign.jsonl. Ready for fresh candidate campaign.')
+    } else {
+        console.log('Campaign file does not exist. Nothing to clean.')
+    }
+    process.exit(0)
+}
 
 function percentiles(arr) {
     if (!arr || arr.length === 0) return { p50: null, p90: null, p99: null, max: null, min: null, n: 0 }
@@ -34,6 +48,12 @@ function pad(str, len, align = 'left') {
     return str.padEnd(len)
 }
 
+function isSyntheticRecord(r) {
+    if (r.source === 'test') return true
+    const route = String(r.routeId || '').toLowerCase()
+    return route.includes('test') || route.includes('gate') || route.includes('opp-paper')
+}
+
 function runReport() {
     console.log('╔══════════════════════════════════════════════════════════════════════════════╗')
     console.log('║        🍣 SUSHIBREAD - PHASE 5 PREFLIGHT CAMPAIGN SURVIVAL REPORT             ║')
@@ -53,21 +73,32 @@ function runReport() {
     }
 
     const lines = raw.split('\n').filter(Boolean)
-    const records = []
+    const allRecords = []
     for (const l of lines) {
         try {
             const r = JSON.parse(l)
             if (r.revertReason) {
                 r.outcome = classifyOutcome({ reason: r.outcome, revertReason: r.revertReason }, r.revertReason)
             }
-            records.push(r)
+            allRecords.push(r)
         } catch (e) {}
     }
 
-    const total = records.length
+    const showAll = process.argv.includes('--all')
+    const liveRecords = allRecords.filter(r => !isSyntheticRecord(r))
+    const testRecords = allRecords.filter(isSyntheticRecord)
+
+    let records = showAll ? allRecords : (liveRecords.length > 0 ? liveRecords : allRecords)
+    const isShowingTest = !showAll && liveRecords.length === 0 && testRecords.length > 0
+
     console.log(`📁 Log Source:        data/preflight_campaign.jsonl`)
-    console.log(`📊 Sample Size:       ${total} total candidate events recorded`)
-    if (records.length > 0) {
+    console.log(`📊 Sample Size:       ${allRecords.length} total entries (${liveRecords.length} live candidates, ${testRecords.length} synthetic test fixtures)`)
+    if (isShowingTest) {
+        console.log(`⚠️  NOTE: Zero live candidates recorded yet. Displaying diagnostics for ${testRecords.length} test entries.\n` +
+                    `   To evaluate real Base Mainnet blocks, start: npm run live-trade\n`)
+    }
+
+    if (records.length > 0 && records[0].ts) {
         const firstTs = new Date(records[0].ts).toLocaleTimeString()
         const lastTs = new Date(records[records.length - 1].ts).toLocaleTimeString()
         console.log(`⏱  Time Window:       ${firstTs} → ${lastTs}\n`)
@@ -81,8 +112,7 @@ function runReport() {
     }
 
     // ── 1. The Real Survival Funnel (Taxonomy v2) ─────────────────────────────────
-    // Separates infrastructure / RPC noise from genuine EVM simulation behavior:
-    const s1_detected     = total
+    const s1_detected     = records.length
     const s2_economic     = s1_detected - counts[OUTCOME.ECONOMIC_FILTER]
     const s3_fresh        = s2_economic - counts[OUTCOME.STALE]
     const s4_built        = s3_fresh - counts[OUTCOME.BUILD_ERROR]
@@ -127,7 +157,42 @@ function runReport() {
     }
     console.log('═'.repeat(78) + '\n')
 
-    // ── 2. Decision Gates Scorecard ──────────────────────────────────────────────
+    // ── 2. State Divergence & Freshness Forensics ────────────────────────────────
+    const forensics = records.filter(r =>
+        r.outcome === OUTCOME.STATE_DIVERGED ||
+        r.outcome === OUTCOME.STALE ||
+        (r.deltaVersion !== undefined && r.deltaVersion !== 0) ||
+        r.opportunityAgeMs >= 200
+    )
+
+    if (forensics.length > 0) {
+        console.log('═'.repeat(88))
+        console.log('  🔍 STATE DIVERGENCE & FRESHNESS FORENSICS')
+        console.log('═'.repeat(88))
+        console.log('Route                            OppVer  PreVer  PostVer   ΔVer   Age(ms)  SimLat(ms) Outcome')
+        console.log('─'.repeat(88))
+        for (const r of forensics.slice(0, 15)) {
+            const route = pad((r.routeId || 'UNKNOWN').slice(0, 32), 32)
+            const oppV = pad(r.opportunityStateVersion !== undefined && r.opportunityStateVersion !== -1 ? r.opportunityStateVersion : (r.stateVersion !== -1 ? r.stateVersion : '-'), 7, 'right')
+            const preV = pad(r.preflightStateVersion !== undefined && r.preflightStateVersion !== -1 ? r.preflightStateVersion : (r.stateVersion !== -1 ? r.stateVersion : '-'), 8, 'right')
+            const postV = pad(r.postStateVersion !== undefined && r.postStateVersion !== -1 ? r.postStateVersion : '-', 9, 'right')
+            let dVStr = '-'
+            if (r.deltaVersion !== undefined && r.deltaVersion !== null) {
+                dVStr = r.deltaVersion > 0 ? '+' + r.deltaVersion : String(r.deltaVersion)
+            }
+            const dV = pad(dVStr, 6, 'right')
+            const age = pad(r.opportunityAgeMs >= 0 ? r.opportunityAgeMs : '-', 9, 'right')
+            const lat = pad(r.preflightLatencyMs >= 0 ? r.preflightLatencyMs : '-', 11, 'right')
+            const out = ' ' + (r.outcome || '').replace('PREFLIGHT_', '')
+            console.log(`${route} ${oppV} ${preV} ${postV} ${dV} ${age} ${lat} ${out}`)
+        }
+        if (forensics.length > 15) {
+            console.log(`... and ${forensics.length - 15} more forensic events`)
+        }
+        console.log('═'.repeat(88) + '\n')
+    }
+
+    // ── 3. Decision Gates Scorecard ──────────────────────────────────────────────
     console.log('═'.repeat(78))
     console.log('  ⚖️  DECISION GATES SCORECARD (Taxonomy v2 - Clean Survival)')
     console.log('═'.repeat(78))
@@ -135,8 +200,9 @@ function runReport() {
     const reachedEthCall = s5_ethCall
     const evmSimulated = s6_rpcOk
     const cleanSuccessRate = evmSimulated > 0 ? (counts[OUTCOME.SUCCESS] / evmSimulated * 100) : 0
-    const rawSuccessRate = reachedEthCall > 0 ? (counts[OUTCOME.SUCCESS] / reachedEthCall * 100) : 0
-    const stateDivRate = counts[OUTCOME.SUCCESS] > 0 ? (counts[OUTCOME.STATE_DIVERGED] / counts[OUTCOME.SUCCESS] * 100) : 0
+    const stateDivRate = (counts[OUTCOME.SUCCESS] + counts[OUTCOME.STATE_DIVERGED]) > 0
+        ? (counts[OUTCOME.STATE_DIVERGED] / (counts[OUTCOME.SUCCESS] + counts[OUTCOME.STATE_DIVERGED]) * 100)
+        : 0
     const fpFailRate = reachedEthCall > 0 ? (counts[OUTCOME.FINGERPRINT_FAILED] / reachedEthCall * 100) : 0
     const rpcErrorRate = reachedEthCall > 0 ? (counts[OUTCOME.RPC_ERROR] / reachedEthCall * 100) : 0
 
@@ -218,7 +284,7 @@ function runReport() {
             : '  →  \x1b[93mKEEP DRY-RUN ACCUMULATING EVIDENCE\x1b[0m'))
     console.log('═'.repeat(78) + '\n')
 
-    // ── 3. Latency & Age Benchmark Distributions ────────────────────────────────
+    // ── 4. Latency & Age Benchmark Distributions ────────────────────────────────
     console.log('═'.repeat(78))
     console.log('  ⚡ LATENCY & AGE BENCHMARK DISTRIBUTIONS')
     console.log('═'.repeat(78))
@@ -244,7 +310,7 @@ function runReport() {
     )
     console.log('═'.repeat(78) + '\n')
 
-    // ── 4. Revert Reason Breakdown ──────────────────────────────────────────────
+    // ── 5. Revert Reason Breakdown ──────────────────────────────────────────────
     const revertReasons = {}
     for (const r of records) {
         if (r.revertReason) {
@@ -259,7 +325,7 @@ function runReport() {
         console.log('Revert String                         Count    % of Reverts    Prescription')
         console.log('─'.repeat(78))
         for (const [rev, cnt] of Object.entries(revertReasons)) {
-            const pct = (cnt / Math.max(1, reverts) * 100).toFixed(1) + '%'
+            const pct = (cnt / Math.max(1, evmReverts) * 100).toFixed(1) + '%'
             let prescription = ''
             if (rev.includes('Too little received')) {
                 prescription = 'Align router minAmountOut with on-chain pool tick price impact'
@@ -277,7 +343,7 @@ function runReport() {
         console.log('═'.repeat(78) + '\n')
     }
 
-    // ── 5. Economics & Sizing Statistics ────────────────────────────────────────
+    // ── 6. Economics & Sizing Statistics ────────────────────────────────────────
     const profits = records.filter(r => r.expectedNetProfitUsd > 0).map(r => r.expectedNetProfitUsd)
     const sizes = records.filter(r => r.optimalSizeUsd > 0).map(r => r.optimalSizeUsd)
     const pProf = percentiles(profits)

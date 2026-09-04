@@ -1,4 +1,5 @@
 'use strict'
+process.env.NODE_ENV = 'test'
 
 const assert = require('assert')
 const { Broadcaster } = require('../src/execution/broadcaster')

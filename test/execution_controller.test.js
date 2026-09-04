@@ -1,4 +1,5 @@
 'use strict'
+process.env.NODE_ENV = 'test'
 
 const assert = require('assert')
 const { NonceManager } = require('../src/execution/nonce_manager')

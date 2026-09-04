@@ -256,14 +256,30 @@ class PreflightCampaign {
             // Deterministic execution fingerprint hash
             fingerprintHash:     preflightMeta.fingerprintHash || receipt?.fingerprintHash || '',
 
-            // State and timing metadata
+            // State and timing metadata with detailed version forensics
+            opportunityStateVersion: preflightMeta.opportunityStateVersion !== undefined
+                ? preflightMeta.opportunityStateVersion
+                : (opp.stateVersion !== undefined ? opp.stateVersion : -1),
             stateVersion:        preflightMeta.stateVersion !== undefined ? preflightMeta.stateVersion : -1,
+            preflightStateVersion: preflightMeta.preflightStateVersion !== undefined
+                ? preflightMeta.preflightStateVersion
+                : (preflightMeta.stateVersion !== undefined ? preflightMeta.stateVersion : -1),
+            postStateVersion:    preflightMeta.postStateVersion !== undefined
+                ? preflightMeta.postStateVersion
+                : (receipt?.currentStateVersion !== undefined ? receipt.currentStateVersion : (preflightMeta.stateVersion !== undefined ? preflightMeta.stateVersion : -1)),
+            deltaVersion:        preflightMeta.deltaVersion !== undefined
+                ? preflightMeta.deltaVersion
+                : (receipt?.currentStateVersion !== undefined && receipt?.preflightStateVersion !== undefined
+                    ? (receipt.currentStateVersion - receipt.preflightStateVersion)
+                    : 0),
+            source:              preflightMeta.source || (process.env.NODE_ENV === 'test' ? 'test' : 'live'),
             opportunityAgeMs:    preflightMeta.opportunityAgeMs !== undefined ? preflightMeta.opportunityAgeMs : -1,
             preflightLatencyMs:  preflightMeta.preflightLatencyMs || 0,
 
             // Simulation outcome details
             revertReason:        preflightMeta.revertReason || receipt?.revertReason || '',
             estimatedGas:        preflightMeta.estimatedGas != null ? preflightMeta.estimatedGas.toString() : '',
+            gasPolicy:           preflightMeta.gasPolicy || null,
 
             // Economic
             expectedNetProfitUsd: opp.peakNetProfitUsd || opp.expectedNetProfitUsd || 0,
@@ -272,8 +288,13 @@ class PreflightCampaign {
 
         // Persist to JSONL (best-effort, never blocks the hot path)
         try {
-            fs.appendFileSync(this.logPath, JSON.stringify(entry) + '\n', 'utf8')
-        } catch (e) {}
+            const jsonStr = JSON.stringify(entry, (key, value) =>
+                typeof value === 'bigint' ? value.toString() : value
+            )
+            fs.appendFileSync(this.logPath, jsonStr + '\n', 'utf8')
+        } catch (e) {
+            if (this.verbose) console.error('[campaign] Failed to append entry:', e.message)
+        }
 
         // Accumulate timing samples for percentile computation
         // Only track latency for candidates that actually reached EVM simulation
@@ -435,9 +456,63 @@ class PreflightCampaign {
         this._opportunityAges = []
         this._allOpportunityAges = []
     }
+
+    /**
+     * Purges all entries from the log file and resets in-memory caches.
+     */
+    clean() {
+        this.reset()
+        try {
+            if (fs.existsSync(this.logPath)) {
+                fs.writeFileSync(this.logPath, '', 'utf8')
+            }
+        } catch (e) {}
+    }
+}
+
+/**
+ * Zero-overhead in-memory campaign logger for unit tests.
+ * Performs no disk I/O and never pollutes data/preflight_campaign.jsonl.
+ */
+class NullCampaignLogger {
+    constructor() {
+        this.counts = {}
+        for (const k of Object.values(OUTCOME)) this.counts[k] = 0
+        this.recentSuccesses = []
+        this.recentFailures = []
+        this.totalRecords = 0
+        this.cleanSuccessRate = '0.0'
+        this.ratios = {
+            cleanSuccessRate: '0.0',
+            preflightSuccessRate: '0.0',
+            stateDivRate: '0.0',
+            insufficientRate: '0.0',
+            tooLittleReceivedRate: '0.0',
+            slippageRate: '0.0',
+            rpcErrorRate: '0.0',
+            fpFailRate: '0.0'
+        }
+    }
+    record() { return {} }
+    getSummary() {
+        return {
+            total: 0,
+            counts: { ...this.counts },
+            recentSuccesses: [],
+            recentFailures: [],
+            cleanSuccessRate: '0.0',
+            successRate: '0.0',
+            ratios: { ...this.ratios },
+            preflightLatencyPct: { p50: null, p90: null, p99: null, max: null, n: 0 },
+            opportunityAgePct:   { p50: null, p90: null, p99: null, max: null, n: 0 }
+        }
+    }
+    reset() {}
+    clean() {}
 }
 
 // Singleton instance for use across the live trader process
 const campaignLogger = new PreflightCampaign({ verbose: true })
 
-module.exports = { PreflightCampaign, campaignLogger, classifyOutcome, OUTCOME }
+module.exports = { PreflightCampaign, NullCampaignLogger, campaignLogger, classifyOutcome, OUTCOME }
+
