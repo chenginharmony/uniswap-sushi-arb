@@ -205,17 +205,21 @@ async function main() {
     let onChainOwner = 'UNKNOWN'
     let uniRouterOk = false
     let cakeRouterOk = false
+    let aeroRouterOk = false
     const EXPECTED_UNI_ROUTER  = '0x2626664c2603336e57b271c5c0b26f421741e481'
     const EXPECTED_CAKE_ROUTER = '0x1b81d678ffb9c0263b24a97847620c99d213eb14'
+    const EXPECTED_AERO_ROUTER = '0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5'
 
     try {
         const ownerRes = await broadcaster.rpcCall('eth_call', [{ to: contractAddress, data: '0x8da5cb5b' }, 'latest'])
         onChainOwner = '0x' + (ownerRes.result ? ownerRes.result.slice(26).toLowerCase() : '')
 
-        const uniRes  = await broadcaster.rpcCall('eth_call', [{ to: contractAddress, data: '0xa9027ced' }, 'latest']) // swapRouter02()
-        const cakeRes = await broadcaster.rpcCall('eth_call', [{ to: contractAddress, data: '0x30f7c1d2' }, 'latest']) // pancakeRouter()
+        const uniRes  = await broadcaster.rpcCall('eth_call', [{ to: contractAddress, data: '0x24e206db' }, 'latest']) // UNISWAP_ROUTER02()
+        const cakeRes = await broadcaster.rpcCall('eth_call', [{ to: contractAddress, data: '0x6b84d5b0' }, 'latest']) // PANCAKESWAP_V3_ROUTER()
+        const aeroRes = await broadcaster.rpcCall('eth_call', [{ to: contractAddress, data: '0x0c29e549' }, 'latest']) // AERODROME_SLIPSTREAM_ROUTER()
         uniRouterOk  = uniRes.result  ? ('0x' + uniRes.result.slice(26).toLowerCase())  === EXPECTED_UNI_ROUTER  : false
         cakeRouterOk = cakeRes.result ? ('0x' + cakeRes.result.slice(26).toLowerCase()) === EXPECTED_CAKE_ROUTER : false
+        aeroRouterOk = aeroRes.result ? ('0x' + aeroRes.result.slice(26).toLowerCase()) === EXPECTED_AERO_ROUTER : false
     } catch (e) { }
 
     const ownerMatch = walletAddress && onChainOwner && walletAddress.toLowerCase() === onChainOwner
@@ -223,6 +227,7 @@ async function main() {
     const ownerBadge = ownerMatch ? '\x1b[92m✓ VERIFIED\x1b[0m' : `\x1b[91m✗ MISMATCH — expected ${walletAddress}\x1b[0m`
     const uniBadge   = uniRouterOk  ? '\x1b[92m✓ VERIFIED\x1b[0m' : '\x1b[91m✗ UNVERIFIED\x1b[0m'
     const cakeBadge  = cakeRouterOk ? '\x1b[92m✓ VERIFIED\x1b[0m' : '\x1b[91m✗ UNVERIFIED\x1b[0m'
+    const aeroBadge  = aeroRouterOk ? '\x1b[92m✓ VERIFIED\x1b[0m' : '\x1b[91m✗ UNVERIFIED\x1b[0m'
 
     console.log('\n\x1b[94m╔' + LINE + '╗\x1b[0m')
     console.log('\x1b[94m║\x1b[0m  \x1b[97m⛓  ON-CHAIN EXECUTOR VERIFICATION (Base Mainnet)\x1b[0m' + ' '.repeat(25) + '\x1b[94m║\x1b[0m')
@@ -234,6 +239,7 @@ async function main() {
     console.log(`\x1b[94m║\x1b[0m  Chain:            Base Mainnet (Chain ID 8453)               \x1b[94m║\x1b[0m`)
     console.log(`\x1b[94m║\x1b[0m  Uniswap Router:   ${uniBadge}` + (uniRouterOk ? ' '.repeat(54) : ' '.repeat(43)) + '\x1b[94m║\x1b[0m')
     console.log(`\x1b[94m║\x1b[0m  PancakeSwap Rtr:  ${cakeBadge}` + (cakeRouterOk ? ' '.repeat(53) : ' '.repeat(42)) + '\x1b[94m║\x1b[0m')
+    console.log(`\x1b[94m║\x1b[0m  Aerodrome Rtr:    ${aeroBadge}` + (aeroRouterOk ? ' '.repeat(55) : ' '.repeat(44)) + '\x1b[94m║\x1b[0m')
     console.log(`\x1b[94m║\x1b[0m  Signer:           ${walletAddress.padEnd(44)}\x1b[94m║\x1b[0m`)
     console.log(`\x1b[94m║\x1b[0m  Balance:          ${balanceCheck.balanceEth} ETH` + ' '.repeat(Math.max(0, 44 - balanceCheck.balanceEth.toString().length - 5)) + '\x1b[94m║\x1b[0m')
     console.log('\x1b[94m╚' + LINE + '╝\x1b[0m\n')
