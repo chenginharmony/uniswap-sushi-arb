@@ -75,6 +75,24 @@ async function main() {
         pools: [{ address: pool, fee: 3000 }]
     })
     assert.strictEqual(v3.name, 'uniswap-v3')
+
+    // Test PoolDiscoveryPipeline classification
+    const { PoolDiscoveryPipeline, CLASSIFICATION } = require('../src/pools/discovery')
+    const pipeline = new PoolDiscoveryPipeline({ provider })
+    const candidate = { address: pool, adapter: 'uniswap-v3' }
+    const bootstrapped = {
+        address: pool,
+        token0: tokenA,
+        token1: tokenB,
+        token0Decimals: 18,
+        token1Decimals: 6,
+        reserve0: '1000',
+        reserve1: '2000'
+    }
+    const report = pipeline.classifyPool(candidate, bootstrapped, [bootstrapped])
+    assert.strictEqual(report.usable, true)
+    assert.strictEqual(report.stage, CLASSIFICATION.USABLE)
+
     console.log('pools-tests-ok')
 }
 

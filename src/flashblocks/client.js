@@ -34,7 +34,14 @@ class FlashblocksClient {
                 this.socket.send(JSON.stringify({ jsonrpc: '2.0', id: this.requestId++, method: 'eth_subscribe', params: [this.subscription] }))
             })
             this.socket.on('message', data => {
-                try { this.queue.push(parseFlashblockMessage(data.toString())) }
+                try {
+                    const parsed = parseFlashblockMessage(data)
+                    if (Array.isArray(parsed)) {
+                        for (const tx of parsed) this.queue.push(tx)
+                    } else if (parsed) {
+                        this.queue.push(parsed)
+                    }
+                }
                 catch (error) { this.logger.warn('[FLASHBLOCKS] malformed payload:', error.message) }
             })
             this.socket.on('error', error => this.logger.warn('[FLASHBLOCKS] connection error:', error.message))

@@ -120,6 +120,7 @@ class PoolStateBootstrapper {
 function createBasePoolBootstrapper(config, state, options = {}) {
     const poolConfigs = config.base && config.base.poolConfigs || []
     if (!poolConfigs.length) return null
+    if (!config.base?.rpcUrl && !options.provider && !options.web3) return null
     const provider = options.provider || new BaseRpcProvider({
         httpUrl: config.base.rpcUrl,
         web3: options.web3

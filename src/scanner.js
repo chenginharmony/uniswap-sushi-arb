@@ -7,14 +7,17 @@ const { opportunityFromRoute } = require('./arbitrage/engine')
 const { createBasePoolBootstrapper } = require('./pools/bootstrap')
 const { CanonicalBlockFeed } = require('./pools/provider')
 const { Metrics } = require('./monitoring/metrics')
+const { validatePoolCoverage, buildCrossDexRoutes } = require('./arbitrage/route_builder')
 
 class Scanner {
-    constructor(options) {
+    constructor(options = {}) {
         this.config = options.config || loadConfig(process.env)
         this.state = options.state || new PoolStateManager()
         this.metrics = options.metrics || new Metrics()
         this.client = options.client
-        this.poolBootstrapper = options.poolBootstrapper || createBasePoolBootstrapper(this.config, this.state, options)
+        this.poolBootstrapper = options.poolBootstrapper !== undefined ?
+            options.poolBootstrapper :
+            (options.decodeAffectedPools ? null : createBasePoolBootstrapper(this.config, this.state, options))
         this.canonicalFeed = options.canonicalFeed || options.canonicalClient
         if (!this.canonicalFeed && this.poolBootstrapper && this.config.base && this.config.base.wsUrl) {
             this.canonicalFeed = new CanonicalBlockFeed({
@@ -25,7 +28,7 @@ class Scanner {
                 metrics: this.metrics
             })
         }
-        this.bootstrapped = !this.poolBootstrapper
+        this.bootstrapped = options.bootstrapped !== undefined ? Boolean(options.bootstrapped) : (!this.poolBootstrapper)
         this.decodeAffectedPools = options.decodeAffectedPools ||
             (this.poolBootstrapper ? this.poolBootstrapper.affectedPools.bind(this.poolBootstrapper) : (() => []))
         this.updatePoolState = options.updatePoolState || this.defaultUpdatePoolState.bind(this)
@@ -34,6 +37,7 @@ class Scanner {
         this.seen = new Map()
         this.ttlMs = options.dedupTtlMs || 120000
         this.running = false
+        this.coverage = null
     }
 
     async start() {
@@ -134,14 +138,30 @@ class Scanner {
         const stateVersion = this.state.version
         const results = await this.mapWithConcurrency(routes, this.maxEvaluationConcurrency, async route => {
             const evaluationStarted = process.hrtime.bigint()
+            this.metrics.increment('opportunitiesEvaluated')
             const result = await this.evaluateRoute(route, event, this.state, this.metrics)
             this.metrics.observe('routeEvaluation', Number(process.hrtime.bigint() - evaluationStarted) / 1000000)
-            if (this.state.version !== stateVersion || result && result.stateVersion !== undefined && result.stateVersion !== stateVersion) {
+
+            if (this.state.version !== stateVersion || (result && result.stateVersion !== undefined && result.stateVersion !== stateVersion)) {
                 this.metrics.increment('staleOpportunities')
                 return null
             }
-            if (result && result.profitable) this.metrics.increment('opportunitiesProfitable')
-            else if (result) this.metrics.increment('opportunitiesRejected')
+
+            if (result && result.profitable) {
+                this.metrics.increment('opportunitiesProfitable')
+                try {
+                    const { buildFlashArbitrageTransaction } = require('./execution/builder')
+                    result.flashTx = buildFlashArbitrageTransaction(result, this.config)
+                } catch (err) {
+                    result.flashTxError = err.message
+                }
+            } else if (result) {
+                if (typeof this.metrics.recordRejection === 'function') {
+                    this.metrics.recordRejection(result.rejectionReason || 'UNPROFITABLE')
+                } else {
+                    this.metrics.increment('opportunitiesRejected')
+                }
+            }
             return result
         })
         return results.filter(Boolean)
@@ -177,6 +197,23 @@ class Scanner {
         }
         const records = await this.poolBootstrapper.bootstrap()
         this.bootstrapped = true
+
+        // Register bidirectional cross-DEX routes if not already registered
+        const poolList = Array.from(this.state.pools.values())
+        const generatedRoutes = buildCrossDexRoutes(poolList, this.config.tokenPrices)
+        for (const route of generatedRoutes) {
+            if (!this.state.routes.has(route.id)) {
+                this.state.registerRoute(route)
+            }
+        }
+
+        // Validate market pool coverage against minPools (default: 5)
+        const routesList = Array.from(this.state.routes.values())
+        this.coverage = validatePoolCoverage(poolList, routesList, this.config.minPools || 5)
+        if (!this.coverage.valid) {
+            console.warn(`[SCANNER] WARNING: ${this.coverage.reason}`)
+        }
+
         return records
     }
 
@@ -199,7 +236,9 @@ class Scanner {
         if (opportunity) {
             opportunity.sourceFlashblock = event.context || null
             opportunity.sourceTransactionHash = event.transactionHash || null
-            metrics.recordNetProfit(opportunity.expectedNetProfitUsd)
+            if (typeof metrics.recordNetProfit === 'function') {
+                metrics.recordNetProfit(opportunity.expectedNetProfitUsd)
+            }
         }
         return opportunity
     }

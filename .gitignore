@@ -1,3 +1,25 @@
+# Environment and secrets (CRITICAL: NEVER COMMIT)
 .env
-node_modules
-sushiswap
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+
+# Runtime and execution logs
+data/*.jsonl
+*.log
+npm-debug.log*
+
+# Scratch and temporary scripts
+scratch/
+
+# Legacy / external
+sushiswap/
+
+# OS files
+.DS_Store
+Thumbs.db
