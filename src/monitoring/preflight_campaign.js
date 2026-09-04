@@ -32,21 +32,25 @@ const path = require('path')
 
 const CAMPAIGN_LOG = path.join(__dirname, '..', '..', 'data', 'preflight_campaign.jsonl')
 
-// Outcome class constants (export for use in controller and tests)
+// Outcome class constants (Taxonomy v2)
 const OUTCOME = {
     SUCCESS:              'PREFLIGHT_SUCCESS',
     INSUFFICIENT_PROFIT:  'PREFLIGHT_INSUFFICIENT_PROFIT',
+    TOO_LITTLE_RECEIVED:  'PREFLIGHT_TOO_LITTLE_RECEIVED',
+    SLIPPAGE_EXCEEDED:    'PREFLIGHT_SLIPPAGE_EXCEEDED',
+    LOK:                  'PREFLIGHT_LOK',
+    RPC_ERROR:            'PREFLIGHT_RPC_ERROR',
+    OTHER_REVERT:         'PREFLIGHT_OTHER_REVERT',
     STALE:                'PREFLIGHT_STALE',
     STATE_DIVERGED:       'PREFLIGHT_STATE_DIVERGED',
-    LOK:                  'PREFLIGHT_LOK',
     ECONOMIC_FILTER:      'PREFLIGHT_ECONOMIC_FILTER',
-    OTHER_REVERT:         'PREFLIGHT_OTHER_REVERT',
     BUILD_ERROR:          'PREFLIGHT_BUILD_ERROR',
     FINGERPRINT_FAILED:   'PREFLIGHT_FINGERPRINT_FAILED'
 }
 
 /**
- * Classify a controller decision/receipt into one of the Phase 5 outcome classes.
+ * Classify a controller decision/receipt into one of the Phase 5 outcome classes (Taxonomy v2).
+ * Separates RPC transport/rate-limit errors from actual on-chain EVM reverts.
  *
  * @param {Object} receipt - Result from controller.processOpportunity()
  * @param {string|null} revertReason - Raw revert string from preflight (if available)
@@ -66,6 +70,16 @@ function classifyOutcome(receipt, revertReason) {
     if (reason === 'STATE_VERSION_DIVERGED_POST_PREFLIGHT') return OUTCOME.STATE_DIVERGED
     if (reason === 'OPPORTUNITY_STALE' || reason === 'STATE_VERSION_DIVERGED') return OUTCOME.STALE
 
+    // RPC transport / infrastructure errors (NOT genuine trading/EVM failures)
+    if (reason === 'PREFLIGHT_RPC_ERROR' || reason.startsWith('RPC_') || receipt.rpcError) {
+        return OUTCOME.RPC_ERROR
+    }
+    if (rev.includes('rate limit') || rev.includes('timeout') || rev.includes('unexpected token') ||
+        rev.includes('econnrefused') || rev.includes('etimedout') || rev.includes('enotfound') ||
+        rev.includes('http 429') || rev.includes('too many requests')) {
+        return OUTCOME.RPC_ERROR
+    }
+
     // Economic pre-filters (before eth_call)
     if (['NOT_PROFITABLE', 'BELOW_MIN_PROFIT_THRESHOLD', 'EXCEEDS_MAX_SIZE_LIMIT',
          'STATE_REVALIDATION_FAILED', 'RECALCULATED_PROFIT_INSUFFICIENT'].includes(reason)) {
@@ -73,10 +87,22 @@ function classifyOutcome(receipt, revertReason) {
     }
 
     if (reason === 'PREFLIGHT_SIMULATION_REVERTED') {
+        // Router minAmountOut protection
+        if (rev.includes('too little received') || rev.includes('toolittlereceived')) {
+            return OUTCOME.TOO_LITTLE_RECEIVED
+        }
+        // Explicit slippage checks
+        if (rev.includes('slippage_exceeded') || rev.includes('leg1slippage') || rev.includes('leg2slippage')) {
+            return OUTCOME.SLIPPAGE_EXCEEDED
+        }
         // LOK = Uniswap V3 reentrancy lock
-        if (rev.includes('lok') || rev.includes('locked') || rev.includes('lock')) return OUTCOME.LOK
+        if (rev.includes('lok') || rev.includes('locked') || rev.includes('lock')) {
+            return OUTCOME.LOK
+        }
+        // Insufficient net profit / repayment shortfall
         if (rev.includes('insufficientprofit') || rev.includes('insufficient_profit') ||
-            rev.includes('profit') || rev.includes('leg2slippage') || rev.includes('leg1slippage')) {
+            rev.includes('insufficient_net_profit') || rev.includes('insufficient net profit') ||
+            rev.includes('insufficient_projected_output') || rev.includes('repayment')) {
             return OUTCOME.INSUFFICIENT_PROFIT
         }
         return OUTCOME.OTHER_REVERT
@@ -151,13 +177,18 @@ class PreflightCampaign {
             for (const line of lines) {
                 try {
                     const entry = JSON.parse(line)
-                    const outcome = entry.outcome
+                    let outcome = entry.outcome
+                    // Reclassify legacy records with Taxonomy v2 if revertReason is available
+                    if (entry.revertReason) {
+                        outcome = classifyOutcome({ reason: outcome, revertReason: entry.revertReason }, entry.revertReason)
+                        entry.outcome = outcome
+                    }
                     if (!outcome || !this.counts.hasOwnProperty(outcome)) continue
                     this.counts[outcome] = (this.counts[outcome] || 0) + 1
                     this.totalRecords++
 
                     const reachedEthCall = ![
-                        OUTCOME.ECONOMIC_FILTER, OUTCOME.STALE, OUTCOME.BUILD_ERROR
+                        OUTCOME.ECONOMIC_FILTER, OUTCOME.STALE, OUTCOME.BUILD_ERROR, OUTCOME.RPC_ERROR
                     ].includes(outcome)
 
                     if (reachedEthCall && entry.preflightLatencyMs > 0) {
@@ -220,26 +251,22 @@ class PreflightCampaign {
             minProfitSurplus:    fp.minProfitSurplus != null ? fp.minProfitSurplus.toString() : '0',
 
             // Gas
-            gasLimit:            receipt?.gasLimit || (fp.gasLimit ? fp.gasLimit.toString() : '650000'),
+            gasLimit:            receipt?.gasLimit != null ? receipt.gasLimit.toString() : '650000',
 
-            // Fingerprint & state
-            fingerprintHash:     receipt?.fingerprintHash || preflightMeta.fingerprintHash || '',
-            stateVersion:        preflightMeta.stateVersion !== undefined
-                                     ? preflightMeta.stateVersion
-                                     : (opp.stateVersion || -1),
+            // Deterministic execution fingerprint hash
+            fingerprintHash:     preflightMeta.fingerprintHash || receipt?.fingerprintHash || '',
 
-            // Timing
-            opportunityAgeMs:    preflightMeta.opportunityAgeMs !== undefined
-                                     ? preflightMeta.opportunityAgeMs
-                                     : (opp.createdAt ? Date.now() - opp.createdAt : -1),
+            // State and timing metadata
+            stateVersion:        preflightMeta.stateVersion !== undefined ? preflightMeta.stateVersion : -1,
+            opportunityAgeMs:    preflightMeta.opportunityAgeMs !== undefined ? preflightMeta.opportunityAgeMs : -1,
             preflightLatencyMs:  preflightMeta.preflightLatencyMs || 0,
 
-            // On-chain result
+            // Simulation outcome details
             revertReason:        preflightMeta.revertReason || receipt?.revertReason || '',
-            estimatedGas:        preflightMeta.estimatedGas ? preflightMeta.estimatedGas.toString() : '',
+            estimatedGas:        preflightMeta.estimatedGas != null ? preflightMeta.estimatedGas.toString() : '',
 
             // Economic
-            expectedNetProfitUsd: opp.peakNetProfitUsd ?? opp.expectedNetProfitUsd ?? 0,
+            expectedNetProfitUsd: opp.peakNetProfitUsd || opp.expectedNetProfitUsd || 0,
             optimalSizeUsd:       opp.optimalSizeUsd || 0
         }
 
@@ -249,9 +276,9 @@ class PreflightCampaign {
         } catch (e) {}
 
         // Accumulate timing samples for percentile computation
-        // Only track latency for candidates that actually reached eth_call
+        // Only track latency for candidates that actually reached EVM simulation
         const reachedEthCall = ![
-            OUTCOME.ECONOMIC_FILTER, OUTCOME.STALE, OUTCOME.BUILD_ERROR
+            OUTCOME.ECONOMIC_FILTER, OUTCOME.STALE, OUTCOME.BUILD_ERROR, OUTCOME.RPC_ERROR
         ].includes(outcome)
 
         if (reachedEthCall && entry.preflightLatencyMs > 0) {
@@ -282,7 +309,9 @@ class PreflightCampaign {
                 ? '\x1b[92m✓\x1b[0m'
                 : outcome === OUTCOME.ECONOMIC_FILTER
                     ? '\x1b[90m–\x1b[0m'
-                    : '\x1b[91m✗\x1b[0m'
+                    : outcome === OUTCOME.RPC_ERROR
+                        ? '\x1b[93m⚡\x1b[0m'
+                        : '\x1b[91m✗\x1b[0m'
             console.log(
                 `[campaign] ${tag} ${outcome.padEnd(32)} ` +
                 `route=${entry.routeId.slice(0, 28).padEnd(28)} ` +
@@ -303,23 +332,36 @@ class PreflightCampaign {
      */
     getSummary() {
         const total = this.totalRecords
-        const successCount      = this.counts[OUTCOME.SUCCESS] || 0
-        const revertCount       = (this.counts[OUTCOME.INSUFFICIENT_PROFIT] || 0) +
-                                  (this.counts[OUTCOME.LOK] || 0) +
-                                  (this.counts[OUTCOME.OTHER_REVERT] || 0)
-        const insufficientCount = this.counts[OUTCOME.INSUFFICIENT_PROFIT] || 0
-        const stateDivCount     = this.counts[OUTCOME.STATE_DIVERGED] || 0
-        const fpFailCount       = this.counts[OUTCOME.FINGERPRINT_FAILED] || 0
-        const staleCount        = (this.counts[OUTCOME.STALE] || 0)
+        const successCount          = this.counts[OUTCOME.SUCCESS] || 0
+        const revertCount           = (this.counts[OUTCOME.INSUFFICIENT_PROFIT] || 0) +
+                                      (this.counts[OUTCOME.TOO_LITTLE_RECEIVED] || 0) +
+                                      (this.counts[OUTCOME.SLIPPAGE_EXCEEDED] || 0) +
+                                      (this.counts[OUTCOME.LOK] || 0) +
+                                      (this.counts[OUTCOME.OTHER_REVERT] || 0)
+        const insufficientCount     = this.counts[OUTCOME.INSUFFICIENT_PROFIT] || 0
+        const tooLittleReceivedCount= this.counts[OUTCOME.TOO_LITTLE_RECEIVED] || 0
+        const slippageCount         = this.counts[OUTCOME.SLIPPAGE_EXCEEDED] || 0
+        const rpcErrorCount         = this.counts[OUTCOME.RPC_ERROR] || 0
+        const stateDivCount         = this.counts[OUTCOME.STATE_DIVERGED] || 0
+        const fpFailCount           = this.counts[OUTCOME.FINGERPRINT_FAILED] || 0
+        const staleCount            = (this.counts[OUTCOME.STALE] || 0)
 
-        // Denominator: candidates that actually reached eth_call
+        // Denominator: candidates that actually reached eth_call stage
         const reachedEthCall = total
             - (this.counts[OUTCOME.ECONOMIC_FILTER] || 0)
             - (this.counts[OUTCOME.STALE] || 0)
             - (this.counts[OUTCOME.BUILD_ERROR] || 0)
 
-        // ── Key campaign ratios ───────────────────────────────────────────────
-        // 1. Preflight success rate  =  SUCCESS / candidates reaching eth_call
+        // Clean EVM simulations (excluding RPC rate-limit / transport outages)
+        const evmSimulated = Math.max(0, reachedEthCall - rpcErrorCount)
+
+        // ── Key campaign ratios (Taxonomy v2) ─────────────────────────────────
+        // 1. Clean Preflight success rate = SUCCESS / clean EVM simulations
+        const cleanSuccessRate = evmSimulated > 0
+            ? (successCount / evmSimulated * 100).toFixed(1)
+            : '0.0'
+
+        // Raw preflight success rate (including RPC transport errors in denominator)
         const preflightSuccessRate = reachedEthCall > 0
             ? (successCount / reachedEthCall * 100).toFixed(1)
             : '0.0'
@@ -329,9 +371,18 @@ class PreflightCampaign {
             ? (stateDivCount / successCount * 100).toFixed(1)
             : '0.0'
 
-        // 3. Insufficient-profit rate = INSUFFICIENT / candidates reaching eth_call
-        const insufficientRate = reachedEthCall > 0
-            ? (insufficientCount / reachedEthCall * 100).toFixed(1)
+        // 3. Revert breakdown rates over clean EVM simulations
+        const insufficientRate = evmSimulated > 0
+            ? (insufficientCount / evmSimulated * 100).toFixed(1)
+            : '0.0'
+        const tooLittleReceivedRate = evmSimulated > 0
+            ? (tooLittleReceivedCount / evmSimulated * 100).toFixed(1)
+            : '0.0'
+        const slippageRate = evmSimulated > 0
+            ? (slippageCount / evmSimulated * 100).toFixed(1)
+            : '0.0'
+        const rpcErrorRate = reachedEthCall > 0
+            ? (rpcErrorCount / reachedEthCall * 100).toFixed(1)
             : '0.0'
 
         // 4. Fingerprint failure rate  (should be 0.0%)
@@ -339,25 +390,32 @@ class PreflightCampaign {
             ? (fpFailCount / reachedEthCall * 100).toFixed(1)
             : '0.0'
 
-        // Overall pass rate across all records (for the header badge)
         const successRate = total > 0 ? (successCount / total * 100).toFixed(1) : '0.0'
 
         return {
             total,
             successCount,
             revertCount,
+            rpcErrorCount,
+            insufficientCount,
+            tooLittleReceivedCount,
+            slippageCount,
             staleCount,
             reachedEthCall,
+            evmSimulated,
             successRate,
-            // Four key ratios
+            cleanSuccessRate,
             ratios: {
+                cleanSuccessRate,
                 preflightSuccessRate,
                 stateDivRate,
                 insufficientRate,
+                tooLittleReceivedRate,
+                slippageRate,
+                rpcErrorRate,
                 fpFailRate
             },
             counts: { ...this.counts },
-            // P50/P90/P99 timing percentiles
             preflightLatencyPct: percentiles(this._preflightLatencies),
             opportunityAgePct:   percentiles(this._opportunityAges),
             recentSuccesses: this.recentSuccesses.slice(0, 5),

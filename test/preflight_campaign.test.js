@@ -263,9 +263,80 @@ async function main() {
         const s = camp.getSummary()
         assert.strictEqual(s.counts[OUTCOME.STATE_DIVERGED], 1)
         pass('Post-preflight state divergence → PREFLIGHT_STATE_DIVERGED recorded')
-
         try { fs.unlinkSync(log) } catch (e) {}
     } catch (e) { fail('Post-preflight divergence campaign integration', e.message) }
+
+    // ── 12. Taxonomy v2 — TOO_LITTLE_RECEIVED classification ────────────────
+    console.log('\n12. Taxonomy v2 — TOO_LITTLE_RECEIVED:')
+    try {
+        const out = classifyOutcome({ executed: false, reason: 'PREFLIGHT_SIMULATION_REVERTED', revertReason: 'Too little received' })
+        assert.strictEqual(out, OUTCOME.TOO_LITTLE_RECEIVED)
+        pass('Too little received → PREFLIGHT_TOO_LITTLE_RECEIVED')
+    } catch (e) { fail('TOO_LITTLE_RECEIVED classification', e.message) }
+
+    // ── 13. Taxonomy v2 — SLIPPAGE_EXCEEDED classification ───────────────────
+    console.log('\n13. Taxonomy v2 — SLIPPAGE_EXCEEDED:')
+    try {
+        const out = classifyOutcome({ executed: false, reason: 'PREFLIGHT_SIMULATION_REVERTED', revertReason: 'SLIPPAGE_EXCEEDED' })
+        assert.strictEqual(out, OUTCOME.SLIPPAGE_EXCEEDED)
+        pass('SLIPPAGE_EXCEEDED → PREFLIGHT_SLIPPAGE_EXCEEDED')
+    } catch (e) { fail('SLIPPAGE_EXCEEDED classification', e.message) }
+
+    // ── 14. Taxonomy v2 — RPC_ERROR classification ───────────────────────────
+    console.log('\n14. Taxonomy v2 — RPC_ERROR:')
+    try {
+        const rateLimitOut = classifyOutcome({ executed: false, reason: 'RPC_RATE_LIMIT', revertReason: 'RPC Rate Limit Exceeded (HTTP 429)' })
+        assert.strictEqual(rateLimitOut, OUTCOME.RPC_ERROR)
+
+        const jsonOut = classifyOutcome({ executed: false, reason: 'PREFLIGHT_SIMULATION_REVERTED', revertReason: 'Unexpected token \'R\', "Rate limit"... is not valid JSON' })
+        assert.strictEqual(jsonOut, OUTCOME.RPC_ERROR)
+
+        const timeoutOut = classifyOutcome({ executed: false, reason: 'RPC_TIMEOUT', revertReason: 'The operation was aborted due to timeout' })
+        assert.strictEqual(timeoutOut, OUTCOME.RPC_ERROR)
+        pass('Rate limits, timeouts, and JSON syntax errors → PREFLIGHT_RPC_ERROR')
+    } catch (e) { fail('RPC_ERROR classification', e.message) }
+
+    // ── 15. Controller integration — RPC transport error recorded as RPC_ERROR ─
+    console.log('\n15. Controller integration — RPC transport error recorded cleanly:')
+    try {
+        const log = tmpLog()
+        const camp = new PreflightCampaign({ logPath: log, verbose: false })
+        const mockRpcError = async () => ({ simulated: false, success: false, rpcError: true, errorType: 'RPC_RATE_LIMIT', error: 'Rate limit exceeded' })
+
+        const ctrl = new ExecutionController({
+            maxSizeUsd: 10000, minProfitUsd: 0.50, maxOpportunityAgeMs: 5000,
+            preflight: mockRpcError, campaign: camp
+        })
+
+        const receipt = await ctrl.processOpportunity(makeOpp(), { now: Date.now(), currentVersion: 7, getStateVersion: () => 7 })
+        assert.strictEqual(receipt.executed, false)
+        assert.strictEqual(receipt.rpcError, true)
+
+        const s = camp.getSummary()
+        assert.strictEqual(s.counts[OUTCOME.RPC_ERROR], 1)
+        assert.strictEqual(s.counts[OUTCOME.OTHER_REVERT], 0, 'RPC error must not be counted as OTHER_REVERT')
+        pass('RPC transport failure → PREFLIGHT_RPC_ERROR (not EVM revert)')
+
+        try { fs.unlinkSync(log) } catch (e) {}
+    } catch (e) { fail('RPC transport error controller integration', e.message) }
+
+    // ── 16. Clean Survival Rate calculation ──────────────────────────────────
+    console.log('\n16. Clean Survival Rate calculation:')
+    try {
+        const camp = new PreflightCampaign({ logPath: tmpLog(), verbose: false })
+        const opp = makeOpp()
+        // 4 successes, 1 too-little-received, 1 rpc-error
+        for (let i = 0; i < 4; i++) camp.record({ executed: true, fingerprintParity: true }, opp, null, {})
+        camp.record({ executed: false, reason: 'PREFLIGHT_SIMULATION_REVERTED', revertReason: 'Too little received' }, opp, null, {})
+        camp.record({ executed: false, reason: 'RPC_RATE_LIMIT', revertReason: 'HTTP 429' }, opp, null, {})
+
+        const s = camp.getSummary()
+        // Reached eth_call = 6, but EVM simulated = 5 (excluding 1 RPC error).
+        // Clean success = 4/5 = 80.0%, Raw success = 4/6 = 66.7%
+        assert.strictEqual(s.cleanSuccessRate, '80.0', 'Clean survival rate should exclude RPC errors')
+        assert.strictEqual(s.ratios.preflightSuccessRate, '66.7', 'Raw preflight success rate includes all attempts')
+        pass(`Clean survival rate = ${s.cleanSuccessRate}% (4/5) vs Raw = ${s.ratios.preflightSuccessRate}% (4/6)`)
+    } catch (e) { fail('Clean survival rate calculation', e.message) }
 
     // ── Summary ───────────────────────────────────────────────────────────────
     console.log('\n=============================================================')

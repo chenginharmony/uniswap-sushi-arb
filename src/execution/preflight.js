@@ -62,6 +62,8 @@ function decodeRevertReason(hexData) {
 
 /**
  * Performs an eth_call preflight simulation against Base RPC without broadcasting.
+ * Uses a single fast round-trip and explicitly categorizes RPC transport errors
+ * (rate limits, timeouts, connection failures) separately from EVM on-chain reverts.
  *
  * @param {Object} txPayload - Unsigned transaction payload { to, data, ... }
  * @param {string} rpcUrl - Base JSON-RPC URL
@@ -95,6 +97,9 @@ async function preflightSimulation(txPayload, rpcUrl, stateOverrides = null) {
     }
 
     try {
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 2500) // 2.5s fast timeout to avoid blocking
+
         const response = await fetch(rpcUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -103,12 +108,39 @@ async function preflightSimulation(txPayload, rpcUrl, stateOverrides = null) {
                 id: Date.now(),
                 method: 'eth_call',
                 params
-            })
+            }),
+            signal: controller.signal
         })
+        clearTimeout(timeoutId)
+
+        if (!response.ok) {
+            const text = await response.text().catch(() => '')
+            const isRateLimit = response.status === 429 || text.toLowerCase().includes('rate limit')
+            return {
+                simulated: false,
+                success: false,
+                rpcError: true,
+                errorType: isRateLimit ? 'RPC_RATE_LIMIT' : 'RPC_HTTP_ERROR',
+                httpStatus: response.status,
+                error: isRateLimit ? 'RPC Rate Limit Exceeded (HTTP 429)' : `RPC HTTP Error ${response.status}: ${text.slice(0, 100)}`
+            }
+        }
 
         const result = await response.json()
 
         if (result.error) {
+            const errMsg = String(result.error.message || '').toLowerCase()
+            const isRpcErr = errMsg.includes('rate limit') || errMsg.includes('too many requests') || result.error.code === -32005
+            if (isRpcErr) {
+                return {
+                    simulated: false,
+                    success: false,
+                    rpcError: true,
+                    errorType: 'RPC_RATE_LIMIT',
+                    error: result.error.message || 'RPC Rate Limit Exceeded'
+                }
+            }
+
             const revertReason = decodeRevertReason(result.error.data)
             const fallbackReason = (result.error.message && result.error.message.includes('revert'))
                 ? result.error.message
@@ -122,36 +154,22 @@ async function preflightSimulation(txPayload, rpcUrl, stateOverrides = null) {
             }
         }
 
-        let estimatedGas = null
-        try {
-            const estRes = await fetch(rpcUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    jsonrpc: '2.0',
-                    id: Date.now() + 1,
-                    method: 'eth_estimateGas',
-                    params: [callObj]
-                })
-            })
-            const estJson = await estRes.json()
-            if (estJson.result && estJson.result !== '0x') {
-                estimatedGas = BigInt(estJson.result)
-            }
-        } catch (e) {}
-
         return {
             simulated: true,
             success: true,
             reverted: false,
-            result: result.result,
-            estimatedGas
+            result: result.result
         }
     } catch (err) {
+        const msg = String(err.message || err)
+        const isRateLimit = msg.toLowerCase().includes('rate limit')
+        const isTimeout = msg.toLowerCase().includes('timeout') || err.name === 'AbortError'
         return {
             simulated: false,
             success: false,
-            error: err.message
+            rpcError: true,
+            errorType: isRateLimit ? 'RPC_RATE_LIMIT' : (isTimeout ? 'RPC_TIMEOUT' : 'RPC_NETWORK_ERROR'),
+            error: isRateLimit ? 'RPC Rate Limit Exceeded' : msg
         }
     }
 }

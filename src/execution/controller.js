@@ -174,14 +174,26 @@ class ExecutionController {
         const _preflightLatencyMs = Date.now() - _preflightT0
 
         if (!preflightResult.success || preflightResult.reverted) {
+            const isRpcError = Boolean(preflightResult.rpcError || preflightResult.simulated === false)
+            const reason = isRpcError
+                ? (preflightResult.errorType || 'PREFLIGHT_RPC_ERROR')
+                : 'PREFLIGHT_SIMULATION_REVERTED'
+            const revertReason = isRpcError
+                ? (preflightResult.error || 'RPC_TRANSPORT_FAILED')
+                : (preflightResult.revertReason || 'REVERTED_WITHOUT_REASON')
+
             if (context.profiler && context.traceId) {
                 context.profiler.mark(context.traceId, 'preflighted')
-                context.profiler.endTrace(context.traceId, { status: 'PREFLIGHT_REVERTED', error: preflightResult.revertReason })
+                context.profiler.endTrace(context.traceId, {
+                    status: isRpcError ? 'RPC_ERROR' : 'PREFLIGHT_REVERTED',
+                    error: revertReason
+                })
             }
             const res = {
                 executed: false,
-                reason: 'PREFLIGHT_SIMULATION_REVERTED',
-                revertReason: preflightResult.revertReason || preflightResult.error || 'PREFLIGHT_FAILED'
+                reason,
+                revertReason,
+                rpcError: isRpcError
             }
             this.campaign.record(res, opportunity, txBuild.flashParams, {
                 preflightLatencyMs: _preflightLatencyMs,

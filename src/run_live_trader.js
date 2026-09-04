@@ -479,9 +479,9 @@ async function main() {
         }
         lines.push('\x1b[96m└' + '─'.repeat(width - 2) + '┘\x1b[0m')
 
-        // 6. Phase 5 – Preflight Campaign Dashboard
+        // 6. Phase 5 – Preflight Campaign Dashboard (Taxonomy v2)
         const camp = campaignLogger.getSummary()
-        lines.push('\x1b[93m' + makeHeader('🧪 PHASE 5: LIVE PREFLIGHT CAMPAIGN (BROADCAST DISABLED)', width) + '\x1b[0m')
+        lines.push('\x1b[93m' + makeHeader('🧪 PHASE 5: LIVE PREFLIGHT CAMPAIGN (BROADCAST DISABLED - TAXONOMY v2)', width) + '\x1b[0m')
 
         // ─ Outcome tally ─────────────────────────────────────────────────────────
         const campCols = [32, 10, 10, 10, 10, 22]
@@ -489,8 +489,11 @@ async function main() {
         lines.push('├' + '─'.repeat(width - 2) + '┤')
         const outcomeRows = [
             [OUTCOME.SUCCESS,             '\x1b[92m✓ SUCCESS\x1b[0m'],
+            [OUTCOME.TOO_LITTLE_RECEIVED, '\x1b[91m✗ TOO_LITTLE_RCVD\x1b[0m'],
             [OUTCOME.INSUFFICIENT_PROFIT, '\x1b[91m✗ INSUFF_PROFIT\x1b[0m'],
+            [OUTCOME.SLIPPAGE_EXCEEDED,   '\x1b[91m✗ SLIPPAGE_EXCEED\x1b[0m'],
             [OUTCOME.LOK,                 '\x1b[91m✗ LOK (REENTRANT)\x1b[0m'],
+            [OUTCOME.RPC_ERROR,           '\x1b[93m⚡ RPC_ERROR (429)\x1b[0m'],
             [OUTCOME.STATE_DIVERGED,      '\x1b[93m▲ STATE_DIVERGED\x1b[0m'],
             [OUTCOME.FINGERPRINT_FAILED,  '\x1b[91m✗ FP_PARITY_FAIL\x1b[0m'],
             [OUTCOME.STALE,               '\x1b[90m– STALE\x1b[0m'],
@@ -504,10 +507,12 @@ async function main() {
                 label,
                 String(cnt),
                 key === OUTCOME.SUCCESS ? String(cnt) : '',
-                [OUTCOME.INSUFFICIENT_PROFIT, OUTCOME.LOK, OUTCOME.OTHER_REVERT].includes(key) ? String(cnt) : '',
-                [OUTCOME.STALE, OUTCOME.STATE_DIVERGED].includes(key) ? String(cnt) : '',
-                key === OUTCOME.SUCCESS ? `\x1b[92mSUCCESS ${camp.ratios.preflightSuccessRate}%\x1b[0m` :
+                [OUTCOME.TOO_LITTLE_RECEIVED, OUTCOME.INSUFFICIENT_PROFIT, OUTCOME.SLIPPAGE_EXCEEDED, OUTCOME.LOK, OUTCOME.OTHER_REVERT].includes(key) ? String(cnt) : '',
+                [OUTCOME.STALE, OUTCOME.STATE_DIVERGED, OUTCOME.RPC_ERROR].includes(key) ? String(cnt) : '',
+                key === OUTCOME.SUCCESS ? `\x1b[92mCLEAN ${camp.ratios.cleanSuccessRate}%\x1b[0m` :
+                key === OUTCOME.TOO_LITTLE_RECEIVED ? `\x1b[91mMIN_OUT ${camp.ratios.tooLittleReceivedRate}%\x1b[0m` :
                 key === OUTCOME.INSUFFICIENT_PROFIT ? `\x1b[91mINSUFF  ${camp.ratios.insufficientRate}%\x1b[0m` :
+                key === OUTCOME.RPC_ERROR ? `\x1b[93mRPC ERR ${camp.ratios.rpcErrorRate}%\x1b[0m` :
                 key === OUTCOME.FINGERPRINT_FAILED  ? `\x1b[91mFP FAIL ${camp.ratios.fpFailRate}%\x1b[0m` :
                 key === OUTCOME.STATE_DIVERGED ? `\x1b[93mDIVERGED ${camp.ratios.stateDivRate}%\x1b[0m` : ''
             ], campCols, width))
@@ -518,7 +523,7 @@ async function main() {
         lines.push('├' + '─'.repeat(width - 2) + '┤')
 
         // Rolling recent successes
-        lines.push('│ ' + padAnsi('\x1b[92mRecent Preflight Successes:\x1b[0m', width - 4) + ' │')
+        lines.push('│ ' + padAnsi(`\x1b[92mRecent Preflight Successes (Clean Survival: ${camp.ratios.cleanSuccessRate}% | Raw: ${camp.ratios.preflightSuccessRate}%):\x1b[0m`, width - 4) + ' │')
         if (camp.recentSuccesses.length === 0) {
             lines.push('│ ' + padAnsi('  No successful preflights yet.', width - 4) + ' │')
         } else {

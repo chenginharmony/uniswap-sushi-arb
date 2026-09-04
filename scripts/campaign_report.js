@@ -55,7 +55,13 @@ function runReport() {
     const lines = raw.split('\n').filter(Boolean)
     const records = []
     for (const l of lines) {
-        try { records.push(JSON.parse(l)) } catch (e) {}
+        try {
+            const r = JSON.parse(l)
+            if (r.revertReason) {
+                r.outcome = classifyOutcome({ reason: r.outcome, revertReason: r.revertReason }, r.revertReason)
+            }
+            records.push(r)
+        } catch (e) {}
     }
 
     const total = records.length
@@ -67,38 +73,33 @@ function runReport() {
         console.log(`⏱  Time Window:       ${firstTs} → ${lastTs}\n`)
     }
 
-    // ── Count per Outcome ────────────────────────────────────────────────────────
+    // ── Count per Outcome (Taxonomy v2) ──────────────────────────────────────────
     const counts = {}
     for (const k of Object.values(OUTCOME)) counts[k] = 0
     for (const r of records) {
         counts[r.outcome] = (counts[r.outcome] || 0) + 1
     }
 
-    // ── 1. The Real Survival Funnel ──────────────────────────────────────────────
-    // Funnel stages:
-    // 1. Detected (all candidate events)
-    // 2. Passed Economic Filter (total - ECONOMIC_FILTER)
-    // 3. Fresh & In Time Budget (passed - STALE)
-    // 4. Built Calldata (fresh - BUILD_ERROR)
-    // 5. Reached eth_call
-    // 6. Passed On-Chain Simulation (eth_call - REVERTS: INSUFFICIENT_PROFIT, LOK, OTHER_REVERT)
-    // 7. State Still Valid Post-Preflight (sim_pass - STATE_DIVERGED)
-    // 8. Fingerprint Parity Confirmed (valid - FINGERPRINT_FAILED)
-    // 9. Would Broadcast
-
-    const s1_detected = total
-    const s2_economic = s1_detected - counts[OUTCOME.ECONOMIC_FILTER]
-    const s3_fresh = s2_economic - counts[OUTCOME.STALE]
-    const s4_built = s3_fresh - counts[OUTCOME.BUILD_ERROR]
-    const s5_ethCall = s4_built
-    const reverts = counts[OUTCOME.INSUFFICIENT_PROFIT] + counts[OUTCOME.LOK] + counts[OUTCOME.OTHER_REVERT]
-    const s6_simPassed = s5_ethCall - reverts
-    const s7_stateValid = s6_simPassed - counts[OUTCOME.STATE_DIVERGED]
-    const s8_parityValid = s7_stateValid - counts[OUTCOME.FINGERPRINT_FAILED]
-    const s9_wouldBroadcast = s8_parityValid
+    // ── 1. The Real Survival Funnel (Taxonomy v2) ─────────────────────────────────
+    // Separates infrastructure / RPC noise from genuine EVM simulation behavior:
+    const s1_detected     = total
+    const s2_economic     = s1_detected - counts[OUTCOME.ECONOMIC_FILTER]
+    const s3_fresh        = s2_economic - counts[OUTCOME.STALE]
+    const s4_built        = s3_fresh - counts[OUTCOME.BUILD_ERROR]
+    const s5_ethCall      = s4_built
+    const s6_rpcOk        = s5_ethCall - counts[OUTCOME.RPC_ERROR]
+    const evmReverts      = counts[OUTCOME.TOO_LITTLE_RECEIVED] +
+                            counts[OUTCOME.SLIPPAGE_EXCEEDED] +
+                            counts[OUTCOME.INSUFFICIENT_PROFIT] +
+                            counts[OUTCOME.LOK] +
+                            counts[OUTCOME.OTHER_REVERT]
+    const s7_simPassed    = s6_rpcOk - evmReverts
+    const s8_stateValid   = s7_simPassed - counts[OUTCOME.STATE_DIVERGED]
+    const s9_parityValid  = s8_stateValid - counts[OUTCOME.FINGERPRINT_FAILED]
+    const s10_broadcast   = s9_parityValid
 
     console.log('═'.repeat(78))
-    console.log('  🎯 MEV EXECUTION SURVIVAL FUNNEL')
+    console.log('  🎯 MEV EXECUTION SURVIVAL FUNNEL (Taxonomy v2)')
     console.log('═'.repeat(78))
     console.log('Stage                         Count    % of Detected    % of Step    Drop-off Reason')
     console.log('─'.repeat(78))
@@ -108,11 +109,12 @@ function runReport() {
         { name: '2. Economic Filter Passed', cnt: s2_economic, prev: s1_detected, drop: `${counts[OUTCOME.ECONOMIC_FILTER]} dropped (sub-$1.20 / low margin)` },
         { name: '3. Freshness Gate Passed', cnt: s3_fresh, prev: s2_economic, drop: `${counts[OUTCOME.STALE]} dropped (opportunity aged out / stale)` },
         { name: '4. Calldata Built', cnt: s4_built, prev: s3_fresh, drop: `${counts[OUTCOME.BUILD_ERROR]} dropped (calldata / pool route error)` },
-        { name: '5. Reached eth_call RPC', cnt: s5_ethCall, prev: s4_built, drop: '0 (all built candidates simulated)' },
-        { name: '6. On-Chain Sim Passed', cnt: s6_simPassed, prev: s5_ethCall, drop: `${reverts} reverted (${counts[OUTCOME.INSUFFICIENT_PROFIT]} insuff, ${counts[OUTCOME.LOK]} LOK, ${counts[OUTCOME.OTHER_REVERT]} other)` },
-        { name: '7. State Still Valid', cnt: s7_stateValid, prev: s6_simPassed, drop: `${counts[OUTCOME.STATE_DIVERGED]} diverged (chain moved during RPC call)` },
-        { name: '8. Fingerprint Parity OK', cnt: s8_parityValid, prev: s7_stateValid, drop: `${counts[OUTCOME.FINGERPRINT_FAILED]} mismatched (hash assertion failed)` },
-        { name: '★ WOULD BROADCAST', cnt: s9_wouldBroadcast, prev: s8_parityValid, drop: 'Canary / Live execution qualified' }
+        { name: '5. Reached eth_call RPC', cnt: s5_ethCall, prev: s4_built, drop: '0 (all built candidates dispatched)' },
+        { name: '6. RPC Transport Succeeded', cnt: s6_rpcOk, prev: s5_ethCall, drop: `${counts[OUTCOME.RPC_ERROR]} dropped (RPC rate-limit HTTP 429 / timeout / socket)` },
+        { name: '7. On-Chain Sim Passed', cnt: s7_simPassed, prev: s6_rpcOk, drop: `${evmReverts} reverted (${counts[OUTCOME.TOO_LITTLE_RECEIVED]} minOut, ${counts[OUTCOME.INSUFFICIENT_PROFIT]} insuff, ${counts[OUTCOME.SLIPPAGE_EXCEEDED]} slip, ${counts[OUTCOME.LOK]} LOK)` },
+        { name: '8. State Still Valid', cnt: s8_stateValid, prev: s7_simPassed, drop: `${counts[OUTCOME.STATE_DIVERGED]} diverged (chain moved during RPC call)` },
+        { name: '9. Fingerprint Parity OK', cnt: s9_parityValid, prev: s8_stateValid, drop: `${counts[OUTCOME.FINGERPRINT_FAILED]} mismatched (hash assertion failed)` },
+        { name: '★ WOULD BROADCAST', cnt: s10_broadcast, prev: s9_parityValid, drop: 'Canary / Live execution qualified' }
     ]
 
     for (const f of funnel) {
@@ -127,17 +129,19 @@ function runReport() {
 
     // ── 2. Decision Gates Scorecard ──────────────────────────────────────────────
     console.log('═'.repeat(78))
-    console.log('  ⚖️  DECISION GATES SCORECARD (Requirements for Live Broadcasting)')
+    console.log('  ⚖️  DECISION GATES SCORECARD (Taxonomy v2 - Clean Survival)')
     console.log('═'.repeat(78))
 
     const reachedEthCall = s5_ethCall
-    const preflightSuccessRate = reachedEthCall > 0 ? (counts[OUTCOME.SUCCESS] / reachedEthCall * 100) : 0
+    const evmSimulated = s6_rpcOk
+    const cleanSuccessRate = evmSimulated > 0 ? (counts[OUTCOME.SUCCESS] / evmSimulated * 100) : 0
+    const rawSuccessRate = reachedEthCall > 0 ? (counts[OUTCOME.SUCCESS] / reachedEthCall * 100) : 0
     const stateDivRate = counts[OUTCOME.SUCCESS] > 0 ? (counts[OUTCOME.STATE_DIVERGED] / counts[OUTCOME.SUCCESS] * 100) : 0
     const fpFailRate = reachedEthCall > 0 ? (counts[OUTCOME.FINGERPRINT_FAILED] / reachedEthCall * 100) : 0
-    const buildErrorRate = total > 0 ? (counts[OUTCOME.BUILD_ERROR] / total * 100) : 0
+    const rpcErrorRate = reachedEthCall > 0 ? (counts[OUTCOME.RPC_ERROR] / reachedEthCall * 100) : 0
 
-    // Timing percentiles
-    const preflightLats = records.filter(r => r.preflightLatencyMs > 0).map(r => r.preflightLatencyMs)
+    // Timing percentiles (exclude RPC errors from simulation timing)
+    const preflightLats = records.filter(r => r.preflightLatencyMs > 0 && r.outcome !== OUTCOME.RPC_ERROR).map(r => r.preflightLatencyMs)
     const oppAges = records.filter(r => r.opportunityAgeMs >= 0).map(r => r.opportunityAgeMs)
     const pLat = percentiles(preflightLats)
     const pAge = percentiles(oppAges)
@@ -162,16 +166,22 @@ function runReport() {
             pass: counts[OUTCOME.BUILD_ERROR] === 0
         },
         {
+            metric: 'RPC Infrastructure Failures',
+            target: '< 1.0%',
+            actual: `${rpcErrorRate.toFixed(1)}% (${counts[OUTCOME.RPC_ERROR]})`,
+            pass: rpcErrorRate < 1.0
+        },
+        {
+            metric: 'Clean Preflight Success (ex-RPC)',
+            target: '≥ 80.0%',
+            actual: `${cleanSuccessRate.toFixed(1)}% (${counts[OUTCOME.SUCCESS]}/${evmSimulated})`,
+            pass: cleanSuccessRate >= 80.0
+        },
+        {
             metric: 'Post-Preflight State Divergence',
             target: '< 5.0%',
             actual: `${stateDivRate.toFixed(1)}% (${counts[OUTCOME.STATE_DIVERGED]})`,
             pass: stateDivRate <= 5.0
-        },
-        {
-            metric: 'Preflight Success Rate',
-            target: '≥ 80.0%',
-            actual: `${preflightSuccessRate.toFixed(1)}% (${counts[OUTCOME.SUCCESS]}/${reachedEthCall})`,
-            pass: preflightSuccessRate >= 80.0
         },
         {
             metric: 'Opportunity Age P90',
@@ -180,7 +190,7 @@ function runReport() {
             pass: pAge.p90 !== null && pAge.p90 < 200
         },
         {
-            metric: 'Preflight Latency P90',
+            metric: 'Preflight Latency P90 (Clean)',
             target: '< 250 ms',
             actual: pLat.p90 !== null ? `${pLat.p90.toFixed(0)} ms` : 'N/A',
             pass: pLat.p90 !== null && pLat.p90 < 250
